@@ -8,8 +8,8 @@ module.exports = function (api) {
         {
           entry: 'App.tsx',
           icons: [
-            'lucide:message-circle',
-            'lucide:lightbulb',
+            'streamline-sharp:chat-two-bubbles-oval',
+            'streamline-sharp:story-post',
             'lucide:users',
             'lucide:user',
             'lucide:circle-check',

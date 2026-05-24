@@ -137,6 +137,7 @@ export function ChatListScreen() {
       <FlatList
         data={sorted}
         keyExtractor={(c) => c.id}
+        contentContainerStyle={{ paddingBottom: 96 + insets.bottom }}
         renderItem={({ item }) => (
           <ConversationRow
             conversation={item}
