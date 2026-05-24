@@ -1,15 +1,6 @@
-import { useEffect } from 'react';
 import { create } from 'zustand';
 
-export const bootPhases = [
-  'splash',
-  'security',
-  'identity',
-  'keyUnlock',
-  'network',
-  'inboxSync',
-  'ready',
-] as const;
+export const bootPhases = ['identity', 'ready'] as const;
 
 export type BootPhase = (typeof bootPhases)[number];
 
@@ -23,7 +14,7 @@ type BootState = {
 };
 
 export const useBootStore = create<BootState>((set, get) => ({
-  phase: 'splash',
+  phase: 'identity',
   error: null,
   succeed: () => {
     const { phase } = get();
@@ -33,15 +24,5 @@ export const useBootStore = create<BootState>((set, get) => ({
   },
   fail: (message) => set({ error: message }),
   retry: () => set({ error: null }),
-  reset: () => set({ phase: 'splash', error: null }),
+  reset: () => set({ phase: 'identity', error: null }),
 }));
-
-export function useBootAutoAdvance(delayMs = 800) {
-  const succeed = useBootStore((s) => s.succeed);
-  const error = useBootStore((s) => s.error);
-  useEffect(() => {
-    if (error) return;
-    const id = setTimeout(succeed, delayMs);
-    return () => clearTimeout(id);
-  }, [succeed, error, delayMs]);
-}
