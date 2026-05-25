@@ -1,5 +1,5 @@
 import { View } from 'react-native';
-import { ChatListScreen, ChatThreadScreen } from '../chat';
+import { ChatListScreen, ChatThreadScreen, NewChatScreen } from '../chat';
 import { useChatStore, useTabsStore } from '../../src/stores';
 import { BottomTabs } from './BottomTabs';
 import { CommunitiesScreen } from './CommunitiesScreen';
@@ -8,9 +8,11 @@ import { StatusScreen } from './StatusScreen';
 
 export function MainShell() {
   const activeId = useChatStore((s) => s.activeConversationId);
+  const composing = useChatStore((s) => s.composing);
   const activeTab = useTabsStore((s) => s.activeTab);
 
   if (activeId) return <ChatThreadScreen />;
+  if (composing) return <NewChatScreen />;
 
   return (
     <View style={{ flex: 1 }}>

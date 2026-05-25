@@ -18,15 +18,13 @@ export class ApiError extends Error {
 
 type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
-async function request<T>(
+async function jsonRequest<T>(
   method: Method,
   path: string,
   body: unknown | undefined,
   token?: string,
 ): Promise<T> {
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-  };
+  const headers: Record<string, string> = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers.Authorization = `Bearer ${token}`;
 
@@ -49,16 +47,55 @@ async function request<T>(
   return data as T;
 }
 
-export function apiPost<T>(path: string, body: unknown, token?: string): Promise<T> {
-  return request<T>('POST', path, body, token);
+export function apiJsonPost<T>(path: string, body: unknown, token?: string): Promise<T> {
+  return jsonRequest<T>('POST', path, body, token);
 }
 
-export function apiPut<T>(path: string, body: unknown, token?: string): Promise<T> {
-  return request<T>('PUT', path, body, token);
+export function apiJsonGet<T>(path: string, token?: string): Promise<T> {
+  return jsonRequest<T>('GET', path, undefined, token);
 }
 
-export function apiGet<T>(path: string, token?: string): Promise<T> {
-  return request<T>('GET', path, undefined, token);
+export async function apiBinaryRequest(
+  method: Method,
+  path: string,
+  body: Uint8Array | undefined,
+  token: string | undefined,
+  extraHeaders?: Record<string, string>,
+): Promise<Uint8Array> {
+  const headers: Record<string, string> = {
+    Accept: 'application/octet-stream',
+    ...(extraHeaders ?? {}),
+  };
+  if (body !== undefined) headers['Content-Type'] = 'application/octet-stream';
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let wireBody: ArrayBuffer | undefined;
+  if (body !== undefined) {
+    const ab = new ArrayBuffer(body.byteLength);
+    new Uint8Array(ab).set(body);
+    wireBody = ab;
+  }
+
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    method,
+    headers,
+    body: wireBody,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    let message = `Request failed (${res.status})`;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed.error === 'string') message = parsed.error;
+    } catch {
+      if (text) message = text;
+    }
+    throw new ApiError(message, res.status);
+  }
+
+  const ab = await res.arrayBuffer();
+  return new Uint8Array(ab);
 }
 
 function safeJson(text: string): unknown {
@@ -68,3 +105,4 @@ function safeJson(text: string): unknown {
     return null;
   }
 }
+

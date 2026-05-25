@@ -1,9 +1,8 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Iconify } from 'react-native-iconify';
 import { StatusBar } from 'expo-status-bar';
 import {
-  shortFingerprint,
   useAppStore,
   useBootStore,
   useIdentityStore,
@@ -23,6 +22,8 @@ export function ProfileScreen() {
   const phone = useIdentityStore((s) => s.phone);
   const themeOverride = useAppStore((s) => s.themeOverride);
   const setThemeOverride = useAppStore((s) => s.setThemeOverride);
+  const displayName = useAppStore((s) => s.displayName);
+  const setDisplayName = useAppStore((s) => s.setDisplayName);
   const resetBoot = useBootStore((s) => s.reset);
   const resetIdentity = useIdentityStore((s) => s.reset);
   const replayBoot = () => {
@@ -30,8 +31,8 @@ export function ProfileScreen() {
     resetBoot();
   };
 
-  const fingerprint = shortFingerprint(phone || 'self');
   const displayPhone = phone ? formatPhone(phone) : 'not set';
+  const initial = (displayName.trim()[0] ?? phone.replace(/\D/g, '').slice(-1) ?? 'Y').toUpperCase();
 
   return (
     <View style={[styles.flex, { backgroundColor: theme.colors.background }]}>
@@ -55,25 +56,31 @@ export function ProfileScreen() {
         <View style={styles.identityBlock}>
           <View style={[styles.bigAvatar, { backgroundColor: theme.colors.primary }]}>
             <Text style={[styles.bigInitial, { color: theme.colors.onPrimary }]}>
-              {(phone.replace(/\D/g, '').slice(-1) || 'Y').toUpperCase()}
+              {initial}
             </Text>
           </View>
           <View style={{ marginLeft: theme.spacing.md, flex: 1 }}>
-            <Text
+            <TextInput
+              value={displayName}
+              onChangeText={setDisplayName}
+              placeholder="Your name"
+              placeholderTextColor={theme.colors.textMuted}
+              maxLength={40}
               style={[
                 theme.typography.title,
-                { color: theme.colors.text },
+                {
+                  color: theme.colors.text,
+                  padding: 0,
+                },
               ]}
-            >
-              you
-            </Text>
+            />
             <Text
               style={[
                 styles.mono,
                 { color: theme.colors.textMuted, marginTop: 2 },
               ]}
             >
-              {fingerprint} · {displayPhone}
+              {displayPhone}
             </Text>
           </View>
         </View>

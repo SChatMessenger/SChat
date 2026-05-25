@@ -1,6 +1,32 @@
 import { create } from 'zustand';
-import { ApiError, apiPost, apiPut } from '../api/client';
-import { generateKeypair } from '../crypto/keys';
+import {
+  ApiError,
+  apiBinaryRequest,
+  apiJsonPost,
+} from '../api/client';
+import {
+  identityFingerprint,
+  newIdentity,
+  publicBundleOf,
+  serializeBundle,
+} from '../crypto/keys';
+import {
+  OPK_INITIAL_COUNT,
+  OPK_REFILL_BATCH,
+  OPK_REFILL_THRESHOLD,
+  mintOpks,
+  serializeOpkUpload,
+} from '../crypto/prekeys';
+import {
+  clearChats,
+  clearIdentity,
+  clearSession,
+  loadIdentity,
+  loadSession,
+  saveIdentity,
+  saveSession,
+} from '../crypto/persist';
+import type { IdentitySecretBundle } from '../crypto/session';
 import { useBootStore } from './useBootStore';
 
 type IdentityStep = 'phone' | 'code';
@@ -14,12 +40,15 @@ type IdentityState = {
   token: string | null;
   userId: string | null;
   inboxId: string | null;
-  publicKey: string | null;
-  secretKey: string | null;
+  identity: IdentitySecretBundle | null;
+  fingerprint: string | null;
+  hydrated: boolean;
   setPhone: (phone: string) => void;
   setCode: (code: string) => void;
   sendCode: () => Promise<void>;
   verifyCode: () => Promise<void>;
+  hydrateFromStorage: () => Promise<void>;
+  refillOpksIfLow: () => Promise<void>;
   goBack: () => void;
   reset: () => void;
 };
@@ -67,8 +96,32 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
   token: null,
   userId: null,
   inboxId: null,
-  publicKey: null,
-  secretKey: null,
+  identity: null,
+  fingerprint: null,
+  hydrated: false,
+  hydrateFromStorage: async () => {
+    if (get().hydrated) return;
+    try {
+      const [id, sess] = await Promise.all([loadIdentity(), loadSession()]);
+      if (id && sess) {
+        set({
+          identity: id,
+          fingerprint: identityFingerprint(publicBundleOf(id)),
+          token: sess.token,
+          userId: sess.userId,
+          phone: sess.phone,
+          inboxId: sess.inboxId,
+          hydrated: true,
+        });
+        useBootStore.getState().succeed();
+      } else {
+        set({ hydrated: true });
+      }
+    } catch (e) {
+      console.warn('hydrate failed', e);
+      set({ hydrated: true });
+    }
+  },
   setPhone: (phone) => set({ phone, error: null }),
   setCode: (code) => set({ code: code.replace(/\D/g, '').slice(0, 6), error: null }),
   sendCode: async () => {
@@ -80,7 +133,7 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     }
     set({ pending: true, error: null });
     try {
-      await apiPost<{ sent: boolean }>('/auth/request-otp', {
+      await apiJsonPost<{ sent: boolean }>('/auth/request-otp', {
         phone: formatPhoneForApi(phone),
       });
       set({ pending: false, step: 'code', code: '' });
@@ -99,22 +152,40 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     }
     set({ pending: true, error: null });
     try {
-      const res = await apiPost<VerifyOtpRes>('/auth/verify-otp', {
+      const res = await apiJsonPost<VerifyOtpRes>('/auth/verify-otp', {
         phone: formatPhoneForApi(phone),
         otp: code,
       });
 
-      const keys = generateKeypair();
+      const identity = newIdentity();
+      const pub = publicBundleOf(identity);
+      const bundleBytes = serializeBundle(pub);
+
       try {
-        await apiPut<{ updated: boolean }>(
-          '/auth/keys',
-          { public_key: keys.publicKey },
-          res.token,
-        );
+        await apiBinaryRequest('PUT', '/auth/keys', bundleBytes, res.token);
       } catch (keyErr) {
-        // Key upload failed — log but still let user in; they can retry later.
-        // The chat layer should refuse to send until keys are uploaded.
-        console.warn('public key upload failed', keyErr);
+        console.warn('pubkey bundle upload failed', keyErr);
+      }
+
+      try {
+        const opks = mintOpks(identity, OPK_INITIAL_COUNT);
+        await apiBinaryRequest('POST', '/auth/prekeys', serializeOpkUpload(opks), res.token);
+      } catch (opkErr) {
+        console.warn('opk upload failed', opkErr);
+      }
+
+      try {
+        await Promise.all([
+          saveIdentity(identity),
+          saveSession({
+            token: res.token,
+            userId: res.user_id,
+            phone: res.phone,
+            inboxId: res.inbox_id,
+          }),
+        ]);
+      } catch (persistErr) {
+        console.warn('identity persist failed', persistErr);
       }
 
       set({
@@ -123,11 +194,12 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
         userId: res.user_id,
         phone: res.phone,
         inboxId: res.inbox_id,
-        publicKey: keys.publicKey,
-        secretKey: keys.secretKey,
+        identity,
+        fingerprint: identityFingerprint(pub),
       });
       useBootStore.getState().succeed();
     } catch (e) {
+      console.warn('verifyCode failed', e);
       const msg =
         e instanceof ApiError
           ? e.status === 401
@@ -137,8 +209,41 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
       set({ pending: false, error: msg });
     }
   },
+  refillOpksIfLow: async () => {
+    const { token, identity } = get();
+    if (!token || !identity) return;
+    try {
+      const countBytes = await apiBinaryRequest(
+        'GET',
+        '/auth/prekeys/count',
+        undefined,
+        token,
+      );
+      if (countBytes.length < 4) return;
+      const unclaimed =
+        (countBytes[0] |
+          (countBytes[1] << 8) |
+          (countBytes[2] << 16) |
+          (countBytes[3] << 24)) >>>
+        0;
+      if (unclaimed >= OPK_REFILL_THRESHOLD) return;
+      const fresh = mintOpks(identity, OPK_REFILL_BATCH);
+      await apiBinaryRequest(
+        'POST',
+        '/auth/prekeys',
+        serializeOpkUpload(fresh),
+        token,
+      );
+      await saveIdentity(identity);
+    } catch (e) {
+      console.warn('opk refill failed', e);
+    }
+  },
   goBack: () => set({ step: 'phone', code: '', error: null, pending: false }),
-  reset: () =>
+  reset: () => {
+    void clearIdentity();
+    void clearSession();
+    void clearChats();
     set({
       step: 'phone',
       phone: '',
@@ -148,7 +253,8 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
       token: null,
       userId: null,
       inboxId: null,
-      publicKey: null,
-      secretKey: null,
-    }),
+      identity: null,
+      fingerprint: null,
+    });
+  },
 }));

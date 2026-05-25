@@ -1,86 +1,147 @@
-/**
- * Device keypair generation + base64 codec.
- *
- * TODO: replace this stub with libsodium (tweetnacl) once the dep is added.
- * Math.random is NOT cryptographically secure — these keys are placeholders
- * so the API contract can be exercised end-to-end. Real E2E security
- * requires a CSPRNG (expo-crypto / react-native-get-random-values) and an
- * authenticated KEM such as nacl.box (curve25519+xsalsa20+poly1305).
- */
+import {
+  ED25519_PUB_BYTES,
+  ED25519_SIG_BYTES,
+  KYBER_PUB_BYTES,
+  X25519_KEY_BYTES,
+  concat,
+  ed25519KeyGen,
+  ed25519Sign,
+  ed25519Verify,
+  fingerprint,
+  hex,
+  kyberKeyGen,
+  safetyNumber,
+  unhex,
+  x25519KeyGen,
+} from './primitives';
+import type { IdentityPublicBundle, IdentitySecretBundle } from './session';
 
-const KEY_BYTES = 32;
+export const BUNDLE_BYTES =
+  X25519_KEY_BYTES + KYBER_PUB_BYTES + ED25519_PUB_BYTES + X25519_KEY_BYTES + ED25519_SIG_BYTES;
 
-export type Keypair = {
-  publicKey: string;
-  secretKey: string;
+export type SerializedOpk = { id: number; pub: string; sec: string; sig: string };
+
+export type SerializedIdentity = {
+  x25519Pub: string;
+  x25519Sec: string;
+  kyberPub: string;
+  kyberSec: string;
+  ed25519Pub: string;
+  ed25519Sec: string;
+  signedPrekeyPub: string;
+  signedPrekeySec: string;
+  signedPrekeySig: string;
+  opkPool?: SerializedOpk[];
+  nextOpkId?: number;
 };
 
-export function generateKeypair(): Keypair {
+export function newIdentity(): IdentitySecretBundle {
+  const x = x25519KeyGen();
+  const k = kyberKeyGen();
+  const e = ed25519KeyGen();
+  const spk = x25519KeyGen();
+  const sig = ed25519Sign(e.sec, spk.pub);
   return {
-    publicKey: randomBase64(KEY_BYTES),
-    secretKey: randomBase64(KEY_BYTES),
+    x25519: { pub: x.pub, sec: x.sec },
+    kyber: { pub: k.pub, sec: k.sec },
+    ed25519: { pub: e.pub, sec: e.sec },
+    signedPrekey: { pub: spk.pub, sec: spk.sec, sig },
+    opkPool: new Map(),
+    nextOpkId: 1,
   };
 }
 
-export function randomBase64(byteLength: number): string {
-  const bytes = new Uint8Array(byteLength);
-  for (let i = 0; i < byteLength; i++) {
-    bytes[i] = Math.floor(Math.random() * 256);
-  }
-  return bytesToBase64(bytes);
-}
-
-export function bytesToBase64(bytes: Uint8Array): string {
-  const CHARS =
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  let out = '';
-  let i = 0;
-  for (; i + 3 <= bytes.length; i += 3) {
-    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
-    out +=
-      CHARS[(n >> 18) & 63] +
-      CHARS[(n >> 12) & 63] +
-      CHARS[(n >> 6) & 63] +
-      CHARS[n & 63];
-  }
-  if (i < bytes.length) {
-    const rem = bytes.length - i;
-    const n = (bytes[i] << 16) | ((rem === 2 ? bytes[i + 1] : 0) << 8);
-    out += CHARS[(n >> 18) & 63] + CHARS[(n >> 12) & 63];
-    out += rem === 2 ? CHARS[(n >> 6) & 63] : '=';
-    out += '=';
-  }
-  return out;
-}
-
-export function utf8ToBytes(s: string): Uint8Array {
-  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(s);
-  const out: number[] = [];
-  for (let i = 0; i < s.length; i++) {
-    let c = s.charCodeAt(i);
-    if (c < 0x80) out.push(c);
-    else if (c < 0x800) {
-      out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
-    } else {
-      out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
-    }
-  }
-  return new Uint8Array(out);
-}
-
-/**
- * Stub "encrypt": base64s the plaintext as ciphertext, returns dummy nonce
- * and envelope. Pure structural placeholder — produces the shape the backend
- * accepts so the round-trip can be tested. Replace with nacl.box.
- */
-export function sealForRecipient(
-  plaintext: string,
-  _recipientPublicKey: string,
-  _senderSecretKey: string,
-): { ciphertext: string; nonce: string; envelope: string } {
+export function publicBundleOf(id: IdentitySecretBundle): IdentityPublicBundle {
   return {
-    ciphertext: bytesToBase64(utf8ToBytes(plaintext)),
-    nonce: randomBase64(24),
-    envelope: randomBase64(48),
+    x25519Pub: id.x25519.pub,
+    kyberPub: id.kyber.pub,
+    ed25519Pub: id.ed25519.pub,
+    signedPrekeyPub: id.signedPrekey.pub,
+    signedPrekeySig: id.signedPrekey.sig,
   };
+}
+
+export function serializeBundle(pub: IdentityPublicBundle): Uint8Array {
+  return concat(
+    pub.x25519Pub,
+    pub.kyberPub,
+    pub.ed25519Pub,
+    pub.signedPrekeyPub,
+    pub.signedPrekeySig,
+  );
+}
+
+export function deserializeBundle(bytes: Uint8Array): IdentityPublicBundle | null {
+  if (bytes.length !== BUNDLE_BYTES) return null;
+  let off = 0;
+  const x25519Pub = new Uint8Array(bytes.subarray(off, off + X25519_KEY_BYTES));
+  off += X25519_KEY_BYTES;
+  const kyberPub = new Uint8Array(bytes.subarray(off, off + KYBER_PUB_BYTES));
+  off += KYBER_PUB_BYTES;
+  const ed25519Pub = new Uint8Array(bytes.subarray(off, off + ED25519_PUB_BYTES));
+  off += ED25519_PUB_BYTES;
+  const signedPrekeyPub = new Uint8Array(bytes.subarray(off, off + X25519_KEY_BYTES));
+  off += X25519_KEY_BYTES;
+  const signedPrekeySig = new Uint8Array(bytes.subarray(off, off + ED25519_SIG_BYTES));
+  return {
+    x25519Pub,
+    kyberPub,
+    ed25519Pub,
+    signedPrekeyPub,
+    signedPrekeySig,
+  };
+}
+
+export function verifyBundleSignature(pub: IdentityPublicBundle): boolean {
+  return ed25519Verify(pub.ed25519Pub, pub.signedPrekeyPub, pub.signedPrekeySig);
+}
+
+export function serializeIdentity(id: IdentitySecretBundle): SerializedIdentity {
+  const opkPool: SerializedOpk[] = [];
+  id.opkPool.forEach((slot, k) => {
+    opkPool.push({ id: k, pub: hex(slot.pub), sec: hex(slot.sec), sig: hex(slot.sig) });
+  });
+  return {
+    x25519Pub: hex(id.x25519.pub),
+    x25519Sec: hex(id.x25519.sec),
+    kyberPub: hex(id.kyber.pub),
+    kyberSec: hex(id.kyber.sec),
+    ed25519Pub: hex(id.ed25519.pub),
+    ed25519Sec: hex(id.ed25519.sec),
+    signedPrekeyPub: hex(id.signedPrekey.pub),
+    signedPrekeySec: hex(id.signedPrekey.sec),
+    signedPrekeySig: hex(id.signedPrekey.sig),
+    opkPool,
+    nextOpkId: id.nextOpkId,
+  };
+}
+
+export function deserializeIdentity(s: SerializedIdentity): IdentitySecretBundle {
+  const opkPool = new Map<number, { pub: Uint8Array; sec: Uint8Array; sig: Uint8Array }>();
+  for (const e of s.opkPool ?? []) {
+    opkPool.set(e.id, { pub: unhex(e.pub), sec: unhex(e.sec), sig: unhex(e.sig) });
+  }
+  return {
+    x25519: { pub: unhex(s.x25519Pub), sec: unhex(s.x25519Sec) },
+    kyber: { pub: unhex(s.kyberPub), sec: unhex(s.kyberSec) },
+    ed25519: { pub: unhex(s.ed25519Pub), sec: unhex(s.ed25519Sec) },
+    signedPrekey: {
+      pub: unhex(s.signedPrekeyPub),
+      sec: unhex(s.signedPrekeySec),
+      sig: unhex(s.signedPrekeySig),
+    },
+    opkPool,
+    nextOpkId: s.nextOpkId ?? 1,
+  };
+}
+
+export function identityFingerprint(id: IdentityPublicBundle): string {
+  return fingerprint(serializeBundle(id));
+}
+
+export function safetyNumberBetween(
+  a: IdentityPublicBundle,
+  b: IdentityPublicBundle,
+): string {
+  return safetyNumber(serializeBundle(a), serializeBundle(b));
 }

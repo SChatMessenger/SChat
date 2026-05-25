@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   FlatList,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -11,14 +12,12 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import {
-  shortFingerprint,
-  useChatStore,
-  type Message,
-} from '../../src/stores';
+import { useChatStore, type Conversation, type Message } from '../../src/stores';
 import { useTheme, type Theme } from '../../src/theme';
 
 const VERIFIED_GREEN = '#22c55e';
+const UNVERIFIED_AMBER = '#f59e0b';
+const EMPTY_MESSAGES: Message[] = [];
 
 export function ChatThreadScreen() {
   const theme = useTheme();
@@ -27,13 +26,18 @@ export function ChatThreadScreen() {
   const conversation = useChatStore((s) =>
     s.conversations.find((c) => c.id === s.activeConversationId),
   );
-  const messages = useChatStore((s) =>
-    s.activeConversationId ? s.messagesByConversationId[s.activeConversationId] ?? [] : [],
+  const messages = useChatStore(
+    (s) =>
+      (s.activeConversationId
+        ? s.messagesByConversationId[s.activeConversationId]
+        : undefined) ?? EMPTY_MESSAGES,
   );
   const sendMessage = useChatStore((s) => s.sendMessage);
   const closeConversation = useChatStore((s) => s.closeConversation);
+  const setConversationVerified = useChatStore((s) => s.setConversationVerified);
 
   const [draft, setDraft] = useState('');
+  const [verifyOpen, setVerifyOpen] = useState(false);
   const listRef = useRef<FlatList<Message>>(null);
 
   useEffect(() => {
@@ -50,7 +54,9 @@ export function ChatThreadScreen() {
     setDraft('');
   };
 
-  const peerFingerprint = shortFingerprint(conversation.id);
+  const peerFingerprint = conversation.peerFingerprint ?? '????????';
+  const verifiedBadgeColor = conversation.verified ? VERIFIED_GREEN : UNVERIFIED_AMBER;
+  const verifiedLabel = conversation.verified ? 'verified' : 'tap to verify';
 
   return (
     <View style={[styles.flex, { backgroundColor: theme.colors.background }]}>
@@ -85,17 +91,23 @@ export function ChatThreadScreen() {
             >
               {conversation.name}
             </Text>
-            <View style={styles.verifiedLine}>
-              <Text style={[styles.verifiedCheck, { color: VERIFIED_GREEN }]}>✓</Text>
+            <Pressable
+              onPress={() => setVerifyOpen(true)}
+              hitSlop={6}
+              style={styles.verifiedLine}
+            >
+              <Text style={[styles.verifiedCheck, { color: verifiedBadgeColor }]}>
+                {conversation.verified ? '✓' : '!'}
+              </Text>
               <Text
                 style={[
                   styles.verifiedText,
                   { color: theme.colors.textMuted, fontVariant: ['tabular-nums'] },
                 ]}
               >
-                verified · {peerFingerprint}
+                {verifiedLabel} · {peerFingerprint}
               </Text>
-            </View>
+            </Pressable>
           </View>
         </View>
       </View>
@@ -161,9 +173,138 @@ export function ChatThreadScreen() {
         </View>
       </KeyboardAvoidingView>
       <StatusBar style={theme.scheme === 'dark' ? 'light' : 'dark'} />
+      <SafetyNumberModal
+        visible={verifyOpen}
+        conversation={conversation}
+        theme={theme}
+        onClose={() => setVerifyOpen(false)}
+        onToggleVerified={(v) => setConversationVerified(conversation.id, v)}
+      />
     </View>
   );
 }
+
+function SafetyNumberModal({
+  visible,
+  conversation,
+  theme,
+  onClose,
+  onToggleVerified,
+}: {
+  visible: boolean;
+  conversation: Conversation;
+  theme: Theme;
+  onClose: () => void;
+  onToggleVerified: (v: boolean) => void;
+}) {
+  const number = conversation.safetyNumber ?? '— not available —';
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={modalStyles.backdrop}>
+        <View style={[modalStyles.card, { backgroundColor: theme.colors.surface }]}>
+          <Text style={[theme.typography.title, { color: theme.colors.text }]}>
+            Safety number
+          </Text>
+          <Text
+            style={[
+              theme.typography.caption,
+              { color: theme.colors.textMuted, marginTop: 4 },
+            ]}
+          >
+            Compare these 60 digits with {conversation.name} over a trusted channel.
+            If they match, this session has not been MITM'd.
+          </Text>
+
+          <View style={modalStyles.numberBox}>
+            <Text
+              style={[
+                modalStyles.numberText,
+                {
+                  color: theme.colors.text,
+                  fontVariant: ['tabular-nums'],
+                },
+              ]}
+            >
+              {number}
+            </Text>
+          </View>
+
+          <Text
+            style={[
+              theme.typography.caption,
+              { color: theme.colors.textMuted, marginTop: theme.spacing.md },
+            ]}
+          >
+            Peer key fingerprint: {conversation.peerFingerprint ?? '—'}
+          </Text>
+
+          <View style={modalStyles.actions}>
+            <Pressable
+              onPress={() => {
+                onToggleVerified(!conversation.verified);
+                onClose();
+              }}
+              style={({ pressed }) => [
+                modalStyles.btn,
+                {
+                  backgroundColor: conversation.verified
+                    ? theme.colors.surface
+                    : VERIFIED_GREEN,
+                  borderColor: theme.colors.border,
+                  borderWidth: StyleSheet.hairlineWidth,
+                  opacity: pressed ? 0.7 : 1,
+                },
+              ]}
+            >
+              <Text
+                style={{
+                  color: conversation.verified ? theme.colors.text : '#fff',
+                  fontWeight: '600',
+                }}
+              >
+                {conversation.verified ? 'Mark unverified' : 'Mark verified'}
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={onClose}
+              style={({ pressed }) => [
+                modalStyles.btn,
+                {
+                  backgroundColor: theme.colors.background,
+                  borderColor: theme.colors.border,
+                  borderWidth: StyleSheet.hairlineWidth,
+                  opacity: pressed ? 0.7 : 1,
+                },
+              ]}
+            >
+              <Text style={{ color: theme.colors.text }}>Close</Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const modalStyles = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  card: { padding: 20, borderRadius: 16 },
+  numberBox: { marginTop: 16 },
+  numberText: { fontSize: 18, lineHeight: 26, letterSpacing: 1, fontWeight: '600' },
+  actions: { flexDirection: 'row', gap: 12, marginTop: 20 },
+  btn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+});
 
 function Bubble({ message, theme }: { message: Message; theme: Theme }) {
   const mine = message.author === 'me';
