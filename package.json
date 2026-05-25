@@ -9,6 +9,7 @@
     "@noble/post-quantum": "^0.6.1",
     "expo": "~56.0.4",
     "expo-blur": "~56.0.3",
+    "expo-contacts": "^56.0.7",
     "expo-crypto": "~56.0.3",
     "expo-dev-client": "~56.0.15",
     "expo-secure-store": "^56.0.4",

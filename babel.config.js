@@ -15,6 +15,7 @@ module.exports = function (api) {
             'lucide:circle-check',
             'lucide:circle',
             'lucide:refresh-cw',
+            'lucide:log-out',
             'lucide:chevron-right',
           ],
         },

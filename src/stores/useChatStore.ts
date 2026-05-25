@@ -85,6 +85,7 @@ type ChatState = {
   fetchInbox: () => Promise<void>;
   hydrateChats: () => Promise<void>;
   setConversationVerified: (id: string, verified: boolean) => void;
+  deleteConversation: (id: string) => void;
 };
 
 const MIN = 60 * 1000;
@@ -116,10 +117,10 @@ function isValidPhone(phone: string) {
   return digits.length >= 8 && digits.length <= 15;
 }
 
-function formatPhoneForApi(phone: string): string {
-  const trimmed = phone.trim();
+function formatPhoneForLookup(typed: string, myDialCode: string): string {
+  const trimmed = typed.trim();
   if (trimmed.startsWith('+')) return '+' + normalizedPhoneDigits(trimmed);
-  return normalizedPhoneDigits(trimmed);
+  return `${myDialCode}${normalizedPhoneDigits(trimmed)}`;
 }
 
 function readU8(buf: Uint8Array, off: number): { value: number; next: number } {
@@ -267,7 +268,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ hydrated: true });
       return;
     }
-    const conversations: Conversation[] = loaded.conversations.map((c) => {
+    const myInbox = useIdentityStore.getState().inboxId;
+    const filtered = loaded.conversations.filter((c) => !myInbox || c.id !== myInbox);
+    const filteredMessages: Record<string, Message[]> = {};
+    for (const c of filtered) {
+      if (loaded.messages?.[c.id]) filteredMessages[c.id] = loaded.messages[c.id];
+    }
+    const conversations: Conversation[] = filtered.map((c) => {
       const peer = c.peerBundleHex ? deserializeBundle(unhex(c.peerBundleHex)) : null;
       const peerOpk: PeerOpk | null =
         c.peerOpkId && c.peerOpkPubHex && c.peerOpkSigHex
@@ -294,15 +301,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     set({
       conversations,
-      messagesByConversationId: loaded.messages ?? {},
+      messagesByConversationId: filteredMessages,
       hydrated: true,
     });
+    if (filtered.length !== loaded.conversations.length) {
+      persist({ conversations, messagesByConversationId: filteredMessages });
+    }
   },
   setConversationVerified: (id, verified) => {
     const { conversations, messagesByConversationId } = get();
     const next = conversations.map((c) => (c.id === id ? { ...c, verified } : c));
     set({ conversations: next });
     persist({ conversations: next, messagesByConversationId });
+  },
+  deleteConversation: (id) => {
+    const { conversations, messagesByConversationId, activeConversationId } = get();
+    const nextConvs = conversations.filter((c) => c.id !== id);
+    const nextMsgs = { ...messagesByConversationId };
+    delete nextMsgs[id];
+    set({
+      conversations: nextConvs,
+      messagesByConversationId: nextMsgs,
+      activeConversationId: activeConversationId === id ? null : activeConversationId,
+    });
+    persist({ conversations: nextConvs, messagesByConversationId: nextMsgs });
   },
   openConversation: (id) => {
     set((s) => ({
@@ -324,14 +346,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ lookupError: 'Enter a valid phone number.' });
       return;
     }
-    const token = useIdentityStore.getState().token;
+    const idState = useIdentityStore.getState();
+    const token = idState.token;
     if (!token) {
       set({ lookupError: 'Not signed in.' });
       return;
     }
+    const myFullPhone = idState.phone
+      ? `${idState.dialCode}${idState.phone.replace(/\D/g, '')}`
+      : null;
+    const lookupFull = formatPhoneForLookup(trimmed, idState.dialCode);
+    if (myFullPhone && lookupFull === myFullPhone) {
+      set({ lookupError: "You can't message yourself." });
+      return;
+    }
     set({ lookupPending: true, lookupError: null });
     try {
-      const query = encodeURIComponent(formatPhoneForApi(trimmed));
+      const query = encodeURIComponent(lookupFull);
       const bytes = await apiBinaryRequest(
         'GET',
         `/users/lookup?phone=${query}`,

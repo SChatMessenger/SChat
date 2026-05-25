@@ -26,7 +26,7 @@ export function ProfileScreen() {
   const setDisplayName = useAppStore((s) => s.setDisplayName);
   const resetBoot = useBootStore((s) => s.reset);
   const resetIdentity = useIdentityStore((s) => s.reset);
-  const replayBoot = () => {
+  const signOut = () => {
     resetIdentity();
     resetBoot();
   };
@@ -97,8 +97,8 @@ export function ProfileScreen() {
           ))}
         </Section>
 
-        <Section title="Session" theme={theme}>
-          <ActionRow theme={theme} label="Replay boot" onPress={replayBoot} />
+        <Section title="Account" theme={theme}>
+          <ActionRow theme={theme} label="Sign out" onPress={signOut} />
         </Section>
       </View>
 
@@ -206,7 +206,7 @@ function ActionRow({
         },
       ]}
     >
-      <Iconify icon="lucide:refresh-cw" size={16} color={theme.colors.text} />
+      <Iconify icon="lucide:log-out" size={16} color={theme.colors.text} />
       <Text
         style={[
           theme.typography.body,

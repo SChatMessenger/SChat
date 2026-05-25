@@ -34,6 +34,7 @@ type IdentityStep = 'phone' | 'code';
 type IdentityState = {
   step: IdentityStep;
   phone: string;
+  dialCode: string;
   code: string;
   pending: boolean;
   error: string | null;
@@ -44,6 +45,7 @@ type IdentityState = {
   fingerprint: string | null;
   hydrated: boolean;
   setPhone: (phone: string) => void;
+  setDialCode: (dial: string) => void;
   setCode: (code: string) => void;
   sendCode: () => Promise<void>;
   verifyCode: () => Promise<void>;
@@ -66,10 +68,8 @@ function isValidCode(code: string) {
   return /^\d{6}$/.test(code);
 }
 
-function formatPhoneForApi(phone: string): string {
-  const trimmed = phone.trim();
-  if (trimmed.startsWith('+')) return '+' + normalizedPhoneDigits(trimmed);
-  return normalizedPhoneDigits(trimmed);
+function formatPhoneForApi(dialCode: string, national: string): string {
+  return `${dialCode}${normalizedPhoneDigits(national)}`;
 }
 
 export function shortFingerprint(seed: string): string {
@@ -90,6 +90,7 @@ type VerifyOtpRes = {
 export const useIdentityStore = create<IdentityState>((set, get) => ({
   step: 'phone',
   phone: '',
+  dialCode: '+91',
   code: '',
   pending: false,
   error: null,
@@ -122,10 +123,11 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
       set({ hydrated: true });
     }
   },
-  setPhone: (phone) => set({ phone, error: null }),
+  setPhone: (phone) => set({ phone: phone.replace(/\D/g, ''), error: null }),
+  setDialCode: (dialCode) => set({ dialCode, error: null }),
   setCode: (code) => set({ code: code.replace(/\D/g, '').slice(0, 6), error: null }),
   sendCode: async () => {
-    const { phone, pending } = get();
+    const { phone, dialCode, pending } = get();
     if (pending) return;
     if (!isValidPhone(phone)) {
       set({ error: 'Enter a valid phone number.' });
@@ -134,7 +136,7 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     set({ pending: true, error: null });
     try {
       await apiJsonPost<{ sent: boolean }>('/auth/request-otp', {
-        phone: formatPhoneForApi(phone),
+        phone: formatPhoneForApi(dialCode, phone),
       });
       set({ pending: false, step: 'code', code: '' });
     } catch (e) {
@@ -144,7 +146,7 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     }
   },
   verifyCode: async () => {
-    const { phone, code, pending } = get();
+    const { phone, dialCode, code, pending } = get();
     if (pending) return;
     if (!isValidCode(code)) {
       set({ error: 'Enter the 6-digit code.' });
@@ -153,7 +155,7 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     set({ pending: true, error: null });
     try {
       const res = await apiJsonPost<VerifyOtpRes>('/auth/verify-otp', {
-        phone: formatPhoneForApi(phone),
+        phone: formatPhoneForApi(dialCode, phone),
         otp: code,
       });
 
@@ -247,6 +249,7 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     set({
       step: 'phone',
       phone: '',
+      dialCode: '+91',
       code: '',
       pending: false,
       error: null,

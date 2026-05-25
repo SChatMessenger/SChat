@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import {
@@ -16,6 +16,18 @@ export function ChatListScreen() {
   const openConversation = useChatStore((s) => s.openConversation);
   const openCompose = useChatStore((s) => s.openCompose);
   const fetchInbox = useChatStore((s) => s.fetchInbox);
+  const deleteConversation = useChatStore((s) => s.deleteConversation);
+
+  const confirmDelete = (id: string, name: string) => {
+    Alert.alert(
+      'Delete chat',
+      `Remove the conversation with ${name}? Messages on this device will be erased.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => deleteConversation(id) },
+      ],
+    );
+  };
 
   useEffect(() => {
     void fetchInbox();
@@ -86,6 +98,7 @@ export function ChatListScreen() {
               conversation={item}
               theme={theme}
               onPress={() => openConversation(item.id)}
+              onLongPress={() => confirmDelete(item.id, item.name)}
             />
           )}
           ItemSeparatorComponent={() => (
@@ -108,14 +121,17 @@ function ConversationRow({
   conversation,
   theme,
   onPress,
+  onLongPress,
 }: {
   conversation: Conversation;
   theme: Theme;
   onPress: () => void;
+  onLongPress: () => void;
 }) {
   return (
     <Pressable
       onPress={onPress}
+      onLongPress={onLongPress}
       style={({ pressed }) => [
         styles.row,
         {
