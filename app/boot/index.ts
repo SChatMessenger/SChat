@@ -1,1 +1,0 @@
-export { IdentityScreen } from './identity';

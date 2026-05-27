@@ -1,4 +1,4 @@
-import { useIdentityStore } from '../../../src/stores';
+import { useIdentityStore } from '../../store';
 import { OtpCodeScreen } from './OtpCodeScreen';
 import { PhoneEntryScreen } from './PhoneEntryScreen';
 

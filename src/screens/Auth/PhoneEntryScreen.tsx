@@ -10,9 +10,9 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useIdentityStore } from '../../../src/stores';
-import { useTheme, type Theme } from '../../../src/theme';
-import { COUNTRIES, countryByDial, type Country } from '../../../src/data/countries';
+import { useIdentityStore } from '../../store';
+import { useTheme, type Theme } from '../../theme';
+import { COUNTRIES, countryByDial, type Country } from '../../utils/countries';
 
 const ERROR_RED = '#ef4444';
 

@@ -1,14 +1,14 @@
 import { useEffect } from 'react';
 import { AppState } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { IdentityScreen } from './app/boot';
-import { MainShell } from './app/shell';
+import { IdentityScreen } from './screens/Auth';
+import { AppNavigator } from './navigation';
 import {
   useBootStore,
   useChatStore,
   useIdentityStore,
   type BootPhase,
-} from './src/stores';
+} from './store';
 
 export default function App() {
   return (
@@ -48,7 +48,7 @@ function renderPhase(phase: BootPhase) {
     case 'identity':
       return <IdentityScreen />;
     case 'ready':
-      return <MainShell />;
+      return <AppNavigator />;
     default: {
       const _exhaustive: never = phase;
       return _exhaustive;

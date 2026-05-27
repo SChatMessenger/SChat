@@ -12,8 +12,8 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import { useChatStore, type Conversation, type Message } from '../../src/stores';
-import { useTheme, type Theme } from '../../src/theme';
+import { useChatStore, type Conversation, type Message } from '../../store';
+import { useTheme, type Theme } from '../../theme';
 
 const VERIFIED_GREEN = '#22c55e';
 const UNVERIFIED_AMBER = '#f59e0b';

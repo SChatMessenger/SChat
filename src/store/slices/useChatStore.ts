@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { ApiError, apiBinaryRequest } from '../api/client';
+import { ApiError, apiBinaryRequest } from '../../services/api/client';
 import {
   BUNDLE_BYTES,
   deserializeBundle,
@@ -7,7 +7,7 @@ import {
   safetyNumberBetween,
   serializeBundle,
   verifyBundleSignature,
-} from '../crypto/keys';
+} from '../../services/crypto/keys';
 import {
   ED25519_SIG_BYTES,
   X25519_KEY_BYTES,
@@ -17,8 +17,8 @@ import {
   unhex,
   utf8Decode,
   utf8Encode,
-} from '../crypto/primitives';
-import { saveIdentity } from '../crypto/persist';
+} from '../../services/crypto/primitives';
+import { saveIdentity } from '../../services/crypto/persist';
 import {
   deserializeRatchet,
   loadChats,
@@ -26,7 +26,7 @@ import {
   serializeRatchet,
   type SerializedChats,
   type SerializedConversation,
-} from '../crypto/persist';
+} from '../../services/crypto/persist';
 import {
   bootstrapAsInitiator,
   bootstrapAsResponder,
@@ -34,13 +34,13 @@ import {
   peekVersion,
   sealNext,
   type RatchetState,
-} from '../crypto/ratchet';
+} from '../../services/crypto/ratchet';
 import {
   FRAME_BOOTSTRAP,
   FRAME_RATCHET,
   type IdentityPublicBundle,
   type PeerOpk,
-} from '../crypto/session';
+} from '../../services/crypto/session';
 import { useIdentityStore } from './useIdentityStore';
 
 export type Conversation = {

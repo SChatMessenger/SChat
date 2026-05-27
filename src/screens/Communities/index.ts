@@ -1,0 +1,1 @@
+export { CommunitiesScreen } from './CommunitiesScreen';

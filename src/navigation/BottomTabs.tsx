@@ -3,8 +3,8 @@ import { Animated, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import { Iconify } from 'react-native-iconify';
-import { useTabsStore, type TabKey } from '../../src/stores';
-import { useTheme, type Theme } from '../../src/theme';
+import { useTabsStore, type TabKey } from '../store';
+import { useTheme, type Theme } from '../theme';
 
 const TABS: TabKey[] = ['chats', 'status', 'communities', 'profile'];
 

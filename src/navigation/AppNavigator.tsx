@@ -1,12 +1,12 @@
 import { View } from 'react-native';
-import { ChatListScreen, ChatThreadScreen, NewChatScreen } from '../chat';
-import { useChatStore, useTabsStore } from '../../src/stores';
+import { ChatListScreen, ChatThreadScreen, NewChatScreen } from '../screens/Chats';
+import { CommunitiesScreen } from '../screens/Communities';
+import { ProfileScreen } from '../screens/Profile';
+import { StatusScreen } from '../screens/Status';
+import { useChatStore, useTabsStore } from '../store';
 import { BottomTabs } from './BottomTabs';
-import { CommunitiesScreen } from './CommunitiesScreen';
-import { ProfileScreen } from './ProfileScreen';
-import { StatusScreen } from './StatusScreen';
 
-export function MainShell() {
+export function AppNavigator() {
   const activeId = useChatStore((s) => s.activeConversationId);
   const composing = useChatStore((s) => s.composing);
   const activeTab = useTabsStore((s) => s.activeTab);

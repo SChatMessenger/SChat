@@ -2,12 +2,13 @@ import { useEffect } from 'react';
 import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import { Iconify } from 'react-native-iconify';
 import {
   formatRelativeTime,
   useChatStore,
   type Conversation,
-} from '../../src/stores';
-import { useTheme, type Theme } from '../../src/theme';
+} from '../../store';
+import { useTheme, type Theme } from '../../theme';
 
 export function ChatListScreen() {
   const theme = useTheme();
@@ -59,17 +60,28 @@ export function ChatListScreen() {
             />
           </View>
           <Pressable
-            onPress={openCompose}
             hitSlop={10}
             style={({ pressed }) => [
-              styles.compose,
+              styles.headerBtn,
               {
-                borderColor: theme.colors.border,
+                marginLeft: theme.spacing.xs,
                 backgroundColor: pressed ? theme.colors.surface : 'transparent',
               },
             ]}
           >
-            <Text style={[styles.composeGlyph, { color: theme.colors.text }]}>+</Text>
+            <Iconify icon="lucide:search" size={20} color={theme.colors.text} />
+          </Pressable>
+          <Pressable
+            hitSlop={10}
+            style={({ pressed }) => [
+              styles.headerBtn,
+              {
+                marginLeft: theme.spacing.xs,
+                backgroundColor: pressed ? theme.colors.surface : 'transparent',
+              },
+            ]}
+          >
+            <Iconify icon="lucide:more-vertical" size={20} color={theme.colors.text} />
           </Pressable>
         </View>
       </View>
@@ -112,6 +124,22 @@ export function ChatListScreen() {
           )}
         />
       )}
+      <Pressable
+        onPress={openCompose}
+        hitSlop={8}
+        style={({ pressed }) => [
+          styles.fab,
+          {
+            right: theme.spacing.lg,
+            bottom: 96 + insets.bottom + theme.spacing.sm,
+            backgroundColor: theme.colors.primary,
+            opacity: pressed ? 0.85 : 1,
+            shadowColor: theme.colors.text,
+          },
+        ]}
+      >
+        <Text style={[styles.fabGlyph, { color: theme.colors.onPrimary }]}>+</Text>
+      </Pressable>
       <StatusBar style={theme.scheme === 'dark' ? 'light' : 'dark'} />
     </View>
   );
@@ -192,16 +220,27 @@ function ConversationRow({
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   headerRow: { flexDirection: 'row', alignItems: 'center' },
-  accent: { width: 28, height: 3, borderRadius: 2 },
-  compose: {
+  headerBtn: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  composeGlyph: { fontSize: 22, lineHeight: 24, fontWeight: '400' },
+  accent: { width: 28, height: 3, borderRadius: 2 },
+  fab: {
+    position: 'absolute',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.18,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  fabGlyph: { fontSize: 28, lineHeight: 30, fontWeight: '400' },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   row: { flexDirection: 'row', alignItems: 'center' },
   avatar: {

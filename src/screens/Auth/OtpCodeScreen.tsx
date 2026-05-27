@@ -7,8 +7,8 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useIdentityStore } from '../../../src/stores';
-import { useTheme } from '../../../src/theme';
+import { useIdentityStore } from '../../store';
+import { useTheme } from '../../theme';
 
 const ERROR_RED = '#ef4444';
 

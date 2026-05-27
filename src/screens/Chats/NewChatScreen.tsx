@@ -15,8 +15,8 @@ import {
   useChatStore,
   useContactsStore,
   type EnrichedContact,
-} from '../../src/stores';
-import { useTheme, type Theme } from '../../src/theme';
+} from '../../store';
+import { useTheme, type Theme } from '../../theme';
 
 const ON_SCHAT_GREEN = '#22c55e';
 const ERROR_RED = '#ef4444';

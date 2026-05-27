@@ -6,7 +6,7 @@ module.exports = function (api) {
       [
         'react-native-iconify/babel',
         {
-          entry: 'App.tsx',
+          entry: 'src/App.tsx',
           icons: [
             'streamline-sharp:chat-two-bubbles-oval',
             'streamline-sharp:story-post',
@@ -17,6 +17,8 @@ module.exports = function (api) {
             'lucide:refresh-cw',
             'lucide:log-out',
             'lucide:chevron-right',
+            'lucide:search',
+            'lucide:more-vertical',
           ],
         },
       ],

@@ -1,5 +1,5 @@
 import { useColorScheme } from 'react-native';
-import { useAppStore } from '../stores/useAppStore';
+import { useAppStore } from '../store/slices/useAppStore';
 import { buildTheme, type ColorScheme, type Theme } from './tokens';
 
 export function useTheme(): Theme {

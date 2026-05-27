@@ -1,7 +1,7 @@
 import { create } from 'zustand';
-import { ApiError, apiBinaryRequest } from '../api/client';
-import { utf8Encode } from '../crypto/primitives';
-import { ensurePermission, readDeviceContacts, type DeviceContact } from '../services/contacts';
+import { ApiError, apiBinaryRequest } from '../../services/api/client';
+import { utf8Encode } from '../../services/crypto/primitives';
+import { ensurePermission, readDeviceContacts, type DeviceContact } from '../../services/contacts';
 import { useIdentityStore } from './useIdentityStore';
 
 export type ContactStatus = 'registered' | 'unregistered' | 'unknown';

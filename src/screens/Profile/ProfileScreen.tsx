@@ -7,8 +7,8 @@ import {
   useBootStore,
   useIdentityStore,
   type ThemeOverride,
-} from '../../src/stores';
-import { useTheme, type Theme } from '../../src/theme';
+} from '../../store';
+import { useTheme, type Theme } from '../../theme';
 
 const THEME_OPTIONS: { key: ThemeOverride; label: string }[] = [
   { key: 'system', label: 'System' },

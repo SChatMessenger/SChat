@@ -3,20 +3,20 @@ import {
   ApiError,
   apiBinaryRequest,
   apiJsonPost,
-} from '../api/client';
+} from '../../services/api/client';
 import {
   identityFingerprint,
   newIdentity,
   publicBundleOf,
   serializeBundle,
-} from '../crypto/keys';
+} from '../../services/crypto/keys';
 import {
   OPK_INITIAL_COUNT,
   OPK_REFILL_BATCH,
   OPK_REFILL_THRESHOLD,
   mintOpks,
   serializeOpkUpload,
-} from '../crypto/prekeys';
+} from '../../services/crypto/prekeys';
 import {
   clearChats,
   clearIdentity,
@@ -25,8 +25,8 @@ import {
   loadSession,
   saveIdentity,
   saveSession,
-} from '../crypto/persist';
-import type { IdentitySecretBundle } from '../crypto/session';
+} from '../../services/crypto/persist';
+import type { IdentitySecretBundle } from '../../services/crypto/session';
 import { useBootStore } from './useBootStore';
 
 type IdentityStep = 'phone' | 'code';

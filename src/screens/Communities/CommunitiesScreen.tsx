@@ -1,7 +1,7 @@
 import { StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import { useTheme } from '../../src/theme';
+import { useTheme } from '../../theme';
 
 export function CommunitiesScreen() {
   const theme = useTheme();
