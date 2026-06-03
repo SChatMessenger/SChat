@@ -20,16 +20,25 @@ import {
 import {
   clearChats,
   clearIdentity,
+  clearPasscode,
   clearSession,
+  hasPasscode,
   loadIdentity,
   loadSession,
   saveIdentity,
+  savePasscode,
   saveSession,
+  verifyPasscode,
 } from '../../services/crypto/persist';
 import type { IdentitySecretBundle } from '../../services/crypto/session';
+import { useAppStore } from './useAppStore';
 import { useBootStore } from './useBootStore';
 
-type IdentityStep = 'phone' | 'code';
+// Linear sign-in flow:
+//   phone → code → (new account)          profile  → welcome → app
+//                  (existing, passcode on) passcode → welcome → app
+//                  (existing, passcode off)           welcome → app
+type IdentityStep = 'phone' | 'code' | 'profile' | 'passcode' | 'welcome';
 
 type IdentityState = {
   step: IdentityStep;
@@ -44,11 +53,26 @@ type IdentityState = {
   identity: IdentitySecretBundle | null;
   fingerprint: string | null;
   hydrated: boolean;
+  // New-account profile inputs (only used on the 'profile' step).
+  username: string;
+  firstName: string;
+  lastName: string;
+  // Passcode entry buffer + whether this device already has a passcode set
+  // (enter vs create-on-first-use), used on the 'passcode' step.
+  passcode: string;
+  passcodeExists: boolean;
   setPhone: (phone: string) => void;
   setDialCode: (dial: string) => void;
   setCode: (code: string) => void;
+  setUsername: (username: string) => void;
+  setFirstName: (name: string) => void;
+  setLastName: (name: string) => void;
+  setPasscode: (passcode: string) => void;
   sendCode: () => Promise<void>;
   verifyCode: () => Promise<void>;
+  submitProfile: () => void;
+  submitPasscode: () => Promise<void>;
+  finishWelcome: () => void;
   hydrateFromStorage: () => Promise<void>;
   refillOpksIfLow: () => Promise<void>;
   goBack: () => void;
@@ -68,6 +92,14 @@ function isValidCode(code: string) {
   return /^\d{6}$/.test(code);
 }
 
+function isValidUsername(username: string) {
+  return /^[a-z0-9_]{3,32}$/.test(username.trim().toLowerCase());
+}
+
+function isValidPasscode(pin: string) {
+  return /^\d{4,6}$/.test(pin);
+}
+
 function formatPhoneForApi(dialCode: string, national: string): string {
   return `${dialCode}${normalizedPhoneDigits(national)}`;
 }
@@ -85,6 +117,7 @@ type VerifyOtpRes = {
   user_id: string;
   phone: string;
   inbox_id: string;
+  is_new: boolean;
 };
 
 export const useIdentityStore = create<IdentityState>((set, get) => ({
@@ -100,6 +133,11 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
   identity: null,
   fingerprint: null,
   hydrated: false,
+  username: '',
+  firstName: '',
+  lastName: '',
+  passcode: '',
+  passcodeExists: false,
   hydrateFromStorage: async () => {
     if (get().hydrated) return;
     try {
@@ -126,6 +164,12 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
   setPhone: (phone) => set({ phone: phone.replace(/\D/g, ''), error: null }),
   setDialCode: (dialCode) => set({ dialCode, error: null }),
   setCode: (code) => set({ code: code.replace(/\D/g, '').slice(0, 6), error: null }),
+  setUsername: (username) =>
+    set({ username: username.replace(/[^a-zA-Z0-9_]/g, '').toLowerCase().slice(0, 32), error: null }),
+  setFirstName: (firstName) => set({ firstName: firstName.slice(0, 40), error: null }),
+  setLastName: (lastName) => set({ lastName: lastName.slice(0, 40), error: null }),
+  setPasscode: (passcode) =>
+    set({ passcode: passcode.replace(/\D/g, '').slice(0, 6), error: null }),
   sendCode: async () => {
     const { phone, dialCode, pending } = get();
     if (pending) return;
@@ -199,7 +243,21 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
         identity,
         fingerprint: identityFingerprint(pub),
       });
-      useBootStore.getState().succeed();
+
+      // Fork on what the server tells us: a brand-new account collects a
+      // profile; an already-registered one either enters its app passcode (when
+      // the device has that setting on) or sails straight to welcome.
+      if (res.is_new) {
+        set({ step: 'profile', error: null });
+        return;
+      }
+      const passcodeOn = useAppStore.getState().security.appPasscode;
+      if (passcodeOn) {
+        const exists = await hasPasscode();
+        set({ step: 'passcode', passcode: '', passcodeExists: exists, error: null });
+        return;
+      }
+      set({ step: 'welcome', error: null });
     } catch (e) {
       console.warn('verifyCode failed', e);
       const msg =
@@ -210,6 +268,44 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
           : 'Verification failed. Check connection.';
       set({ pending: false, error: msg });
     }
+  },
+  submitProfile: () => {
+    const { username, firstName, lastName, pending } = get();
+    if (pending) return;
+    if (!firstName.trim()) {
+      set({ error: 'Enter your first name.' });
+      return;
+    }
+    if (!isValidUsername(username)) {
+      set({ error: 'Username must be 3-32 letters, numbers or _.' });
+      return;
+    }
+    useAppStore.getState().applySignupProfile({ username, firstName, lastName });
+    set({ step: 'welcome', error: null });
+  },
+  submitMpin: async () => {
+    const { mpin, mpinExists, pending } = get();
+    if (pending) return;
+    if (!isValidMpin(mpin)) {
+      set({ error: 'Enter a 4-6 digit MPIN.' });
+      return;
+    }
+    set({ pending: true, error: null });
+    if (mpinExists) {
+      const ok = await verifyMpinHash(mpin);
+      if (!ok) {
+        set({ pending: false, mpin: '', error: 'Incorrect MPIN.' });
+        return;
+      }
+    } else {
+      // First sign-in on this device with the setting on — set the MPIN now.
+      await saveMpin(mpin);
+    }
+    set({ pending: false, mpin: '', step: 'welcome', error: null });
+  },
+  finishWelcome: () => {
+    set({ error: null });
+    useBootStore.getState().succeed();
   },
   refillOpksIfLow: async () => {
     const { token, identity } = get();
@@ -241,11 +337,20 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
       console.warn('opk refill failed', e);
     }
   },
-  goBack: () => set({ step: 'phone', code: '', error: null, pending: false }),
+  goBack: () =>
+    set({
+      step: 'phone',
+      code: '',
+      mpin: '',
+      mpinExists: false,
+      error: null,
+      pending: false,
+    }),
   reset: () => {
     void clearIdentity();
     void clearSession();
     void clearChats();
+    void clearMpin();
     set({
       step: 'phone',
       phone: '',
@@ -258,6 +363,11 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
       inboxId: null,
       identity: null,
       fingerprint: null,
+      username: '',
+      firstName: '',
+      lastName: '',
+      mpin: '',
+      mpinExists: false,
     });
   },
 }));

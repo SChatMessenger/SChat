@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { Alert, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Iconify } from 'react-native-iconify';
@@ -9,6 +9,7 @@ import {
   type Conversation,
 } from '../../store';
 import { useTheme, type Theme } from '../../theme';
+import { IconButton, PressableScale, ScreenHeader } from '../../components';
 
 export function ChatListScreen() {
   const theme = useTheme();
@@ -18,6 +19,16 @@ export function ChatListScreen() {
   const openCompose = useChatStore((s) => s.openCompose);
   const fetchInbox = useChatStore((s) => s.fetchInbox);
   const deleteConversation = useChatStore((s) => s.deleteConversation);
+
+  const [searching, setSearching] = useState(false);
+  const [query, setQuery] = useState('');
+  // Measured height of the floating glass header, so the list can scroll behind
+  // it; seeded with an estimate to avoid a first-frame jump.
+  const [headerH, setHeaderH] = useState(insets.top + 76);
+  const cancelSearch = () => {
+    setSearching(false);
+    setQuery('');
+  };
 
   const confirmDelete = (id: string, name: string) => {
     Alert.alert(
@@ -36,60 +47,24 @@ export function ChatListScreen() {
     return () => clearInterval(id);
   }, [fetchInbox]);
 
+  // Clear exactly the floating tab bar (bottom: insets.bottom + 8, height 56);
+  // no extra padding so the list ends right at the bar's top edge.
+  const tabClearance = insets.bottom + 64;
   const sorted = [...conversations].sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? sorted.filter(
+        (c) =>
+          c.name.toLowerCase().includes(q) || c.lastMessage.toLowerCase().includes(q),
+      )
+    : sorted;
 
   return (
     <View style={[styles.flex, { backgroundColor: theme.colors.background }]}>
-      <View
-        style={{
-          paddingTop: insets.top + theme.spacing.lg,
-          paddingHorizontal: theme.spacing.lg,
-          paddingBottom: theme.spacing.md,
-        }}
-      >
-        <View style={styles.headerRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={[theme.typography.heading, { color: theme.colors.text }]}>
-              Chats
-            </Text>
-            <View
-              style={[
-                styles.accent,
-                { backgroundColor: theme.colors.primary, marginTop: theme.spacing.sm },
-              ]}
-            />
-          </View>
-          <Pressable
-            hitSlop={10}
-            style={({ pressed }) => [
-              styles.headerBtn,
-              {
-                marginLeft: theme.spacing.xs,
-                backgroundColor: pressed ? theme.colors.surface : 'transparent',
-              },
-            ]}
-          >
-            <Iconify icon="lucide:search" size={20} color={theme.colors.text} />
-          </Pressable>
-          <Pressable
-            hitSlop={10}
-            style={({ pressed }) => [
-              styles.headerBtn,
-              {
-                marginLeft: theme.spacing.xs,
-                backgroundColor: pressed ? theme.colors.surface : 'transparent',
-              },
-            ]}
-          >
-            <Iconify icon="lucide:more-vertical" size={20} color={theme.colors.text} />
-          </Pressable>
-        </View>
-      </View>
-
-      {sorted.length === 0 ? (
-        <View style={styles.empty}>
+      {filtered.length === 0 ? (
+        <View style={[styles.empty, { paddingTop: headerH }]}>
           <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
-            No chats yet.
+            {q ? 'No chats found.' : 'No chats yet.'}
           </Text>
           <Text
             style={[
@@ -97,14 +72,16 @@ export function ChatListScreen() {
               { color: theme.colors.textMuted, marginTop: theme.spacing.xs },
             ]}
           >
-            tap + to find a contact
+            {q ? `nothing matches “${query.trim()}”` : 'tap + to find a contact'}
           </Text>
         </View>
       ) : (
         <FlatList
-          data={sorted}
+          style={styles.flex}
+          data={filtered}
+          keyboardShouldPersistTaps="handled"
           keyExtractor={(c) => c.id}
-          contentContainerStyle={{ paddingBottom: 96 + insets.bottom }}
+          contentContainerStyle={{ paddingTop: headerH, paddingBottom: tabClearance }}
           renderItem={({ item }) => (
             <ConversationRow
               conversation={item}
@@ -124,22 +101,86 @@ export function ChatListScreen() {
           )}
         />
       )}
-      <Pressable
+
+      <View
+        style={styles.headerOverlay}
+        onLayout={(e) => setHeaderH(e.nativeEvent.layout.height)}
+      >
+        <ScreenHeader
+          glass
+          title="Chats"
+          rightSlot={
+            <>
+              <IconButton
+                icon="lucide:search"
+                accessibilityLabel="Search chats"
+                onPress={() => setSearching(true)}
+              />
+              <IconButton icon="lucide:more-vertical" accessibilityLabel="More options" />
+            </>
+          }
+        />
+
+        {searching ? (
+          <View
+            style={[
+              styles.searchRow,
+              {
+                paddingHorizontal: theme.spacing.lg,
+                paddingBottom: theme.spacing.sm,
+                backgroundColor: theme.colors.background,
+              },
+            ]}
+          >
+            <View
+              style={[
+                styles.searchField,
+                { backgroundColor: theme.colors.surface, borderRadius: theme.radii.pill },
+              ]}
+            >
+              <Iconify icon="lucide:search" size={16} color={theme.colors.textMuted} />
+              <TextInput
+                autoFocus
+                value={query}
+                onChangeText={setQuery}
+                placeholder="Search chats"
+                placeholderTextColor={theme.colors.textMuted}
+                returnKeyType="search"
+                style={[
+                  theme.typography.body,
+                  { flex: 1, color: theme.colors.text, paddingVertical: 0, marginLeft: theme.spacing.sm },
+                ]}
+              />
+              {query ? (
+                <Pressable onPress={() => setQuery('')} hitSlop={8} accessibilityLabel="Clear">
+                  <Iconify icon="lucide:x" size={16} color={theme.colors.textMuted} />
+                </Pressable>
+              ) : null}
+            </View>
+            <Pressable onPress={cancelSearch} hitSlop={8} style={{ marginLeft: theme.spacing.md }}>
+              <Text style={[theme.typography.body, { color: theme.colors.primary }]}>Cancel</Text>
+            </Pressable>
+          </View>
+        ) : null}
+      </View>
+
+      <PressableScale
+        scaleTo={0.9}
         onPress={openCompose}
         hitSlop={8}
-        style={({ pressed }) => [
-          styles.fab,
-          {
-            right: theme.spacing.lg,
-            bottom: 96 + insets.bottom + theme.spacing.sm,
-            backgroundColor: theme.colors.primary,
-            opacity: pressed ? 0.85 : 1,
-            shadowColor: theme.colors.text,
-          },
-        ]}
+        accessibilityRole="button"
+        accessibilityLabel="New chat"
+        style={({ pressed }: { pressed: boolean }) => ({
+          ...styles.fab,
+          right: theme.spacing.lg,
+          bottom: tabClearance + theme.spacing.sm,
+          backgroundColor: theme.colors.primary,
+          opacity: pressed ? 0.9 : 1,
+          shadowColor: theme.colors.text,
+        })}
       >
         <Text style={[styles.fabGlyph, { color: theme.colors.onPrimary }]}>+</Text>
-      </Pressable>
+      </PressableScale>
       <StatusBar style={theme.scheme === 'dark' ? 'light' : 'dark'} />
     </View>
   );
@@ -219,15 +260,15 @@ function ConversationRow({
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  headerRow: { flexDirection: 'row', alignItems: 'center' },
-  headerBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+  headerOverlay: { position: 'absolute', top: 0, left: 0, right: 0 },
+  searchRow: { flexDirection: 'row', alignItems: 'center' },
+  searchField: {
+    flex: 1,
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    height: 38,
+    paddingHorizontal: 12,
   },
-  accent: { width: 28, height: 3, borderRadius: 2 },
   fab: {
     position: 'absolute',
     width: 56,

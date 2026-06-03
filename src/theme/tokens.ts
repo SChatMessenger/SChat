@@ -1,9 +1,20 @@
+import { Dimensions, PixelRatio } from 'react-native';
+
+const BASE_WIDTH = 375;
+const SCREEN_WIDTH = Dimensions.get('window').width;
+const RAW_SCALE = SCREEN_WIDTH / BASE_WIDTH;
+export const SCALE = Math.min(Math.max(RAW_SCALE, 0.9), 1.25);
+
+function s(n: number): number {
+  return PixelRatio.roundToNearestPixel(n * SCALE);
+}
+
 export const spacing = {
-  xs: 4,
-  sm: 8,
-  md: 16,
-  lg: 24,
-  xl: 32,
+  xs: s(4),
+  sm: s(8),
+  md: s(16),
+  lg: s(24),
+  xl: s(32),
 } as const;
 
 export const radii = {
@@ -14,10 +25,15 @@ export const radii = {
 } as const;
 
 export const typography = {
-  body: { fontSize: 16, lineHeight: 24 },
-  title: { fontSize: 22, lineHeight: 28, fontWeight: '600' as const },
-  heading: { fontSize: 32, lineHeight: 38, fontWeight: '700' as const },
-  caption: { fontSize: 13, lineHeight: 18 },
+  body: { fontSize: s(16), lineHeight: s(24) },
+  title: { fontSize: s(22), lineHeight: s(28), fontWeight: '600' as const },
+  heading: { fontSize: s(28), lineHeight: s(34), fontWeight: '700' as const },
+  caption: { fontSize: s(13), lineHeight: s(18) },
+} as const;
+
+export const touch = {
+  min: 44,
+  hitSlop: 10,
 } as const;
 
 export type ColorScheme = 'light' | 'dark';
@@ -30,6 +46,10 @@ export type Colors = {
   primary: string;
   onPrimary: string;
   border: string;
+  /** Translucent tint laid over a BlurView for liquid-glass surfaces. */
+  glassTint: string;
+  /** Light "glass edge" highlight border for liquid-glass surfaces. */
+  glassEdge: string;
 };
 
 const lightColors: Colors = {
@@ -40,16 +60,21 @@ const lightColors: Colors = {
   primary: '#2563eb',
   onPrimary: '#ffffff',
   border: '#e5e5ea',
+  // Thin, blur-forward tint so the frosted content reads through (liquid glass).
+  glassTint: 'rgba(255,255,255,0.28)',
+  glassEdge: 'rgba(255,255,255,0.7)',
 };
 
 const darkColors: Colors = {
-  background: '#0b0b0d',
-  surface: '#1a1a1f',
+  background: '#010101',
+  surface: '#212121',
   text: '#f5f5f7',
   textMuted: '#a0a0a8',
   primary: '#60a5fa',
   onPrimary: '#0b0b0d',
   border: '#2a2a30',
+  glassTint: 'rgba(20,20,26,0.28)',
+  glassEdge: 'rgba(255,255,255,0.18)',
 };
 
 export const palette: Record<ColorScheme, Colors> = {
@@ -63,6 +88,7 @@ export type Theme = {
   spacing: typeof spacing;
   radii: typeof radii;
   typography: typeof typography;
+  touch: typeof touch;
 };
 
 export function buildTheme(scheme: ColorScheme): Theme {
@@ -72,5 +98,6 @@ export function buildTheme(scheme: ColorScheme): Theme {
     spacing,
     radii,
     typography,
+    touch,
   };
 }

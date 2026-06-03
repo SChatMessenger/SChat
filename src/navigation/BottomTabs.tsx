@@ -3,7 +3,7 @@ import { Animated, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import { Iconify } from 'react-native-iconify';
-import { useTabsStore, type TabKey } from '../store';
+import { useAppStore, useTabsStore, type TabKey } from '../store';
 import { useTheme, type Theme } from '../theme';
 
 const TABS: TabKey[] = ['chats', 'status', 'communities', 'profile'];
@@ -37,16 +37,30 @@ export function BottomTabs() {
   const insets = useSafeAreaInsets();
   const activeTab = useTabsStore((s) => s.activeTab);
   const setActiveTab = useTabsStore((s) => s.setActiveTab);
+  const closeProfileSubScreen = useAppStore((s) => s.closeProfileSubScreen);
+
+  const switchTab = (key: TabKey) => {
+    closeProfileSubScreen();
+    setActiveTab(key);
+  };
 
   const [barWidth, setBarWidth] = useState(0);
   const tabWidth = barWidth > 0 ? (barWidth - INDICATOR_INSET * 2) / TABS.length : 0;
   const activeIndex = Math.max(0, TABS.indexOf(activeTab));
 
   const indicatorX = useRef(new Animated.Value(activeIndex * tabWidth)).current;
+  const settled = useRef(false);
 
   useEffect(() => {
+    if (tabWidth === 0) return;
+    const target = activeIndex * tabWidth;
+    if (!settled.current) {
+      indicatorX.setValue(target);
+      settled.current = true;
+      return;
+    }
     Animated.spring(indicatorX, {
-      toValue: activeIndex * tabWidth,
+      toValue: target,
       useNativeDriver: true,
       tension: 180,
       friction: 18,
@@ -60,7 +74,7 @@ export function BottomTabs() {
     >
       <View style={[styles.shadowFrame, shadowFor(theme)]}>
         <BlurView
-          intensity={Platform.OS === 'ios' ? 60 : 90}
+          intensity={Platform.OS === 'ios' ? 75 : 100}
           tint={theme.scheme === 'dark' ? 'dark' : 'light'}
           style={styles.blur}
         >
@@ -69,8 +83,8 @@ export function BottomTabs() {
             style={[
               styles.barInner,
               {
-                backgroundColor: tintForScheme(theme),
-                borderColor: theme.colors.border,
+                backgroundColor: theme.colors.glassTint,
+                borderColor: theme.colors.glassEdge,
               },
             ]}
           >
@@ -96,7 +110,7 @@ export function BottomTabs() {
                 key={key}
                 tabKey={key}
                 active={activeTab === key}
-                onPress={() => setActiveTab(key)}
+                onPress={() => switchTab(key)}
               />
             ))}
           </View>
@@ -164,10 +178,6 @@ function TabItem({
   );
 }
 
-function tintForScheme(theme: Theme) {
-  return theme.scheme === 'dark' ? 'rgba(26,26,31,0.55)' : 'rgba(255,255,255,0.55)';
-}
-
 function shadowFor(theme: Theme) {
   return Platform.select({
     ios: {
@@ -195,7 +205,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     height: BAR_HEIGHT,
     borderRadius: BAR_HEIGHT / 2,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     paddingHorizontal: INDICATOR_INSET,
   },
   indicator: {

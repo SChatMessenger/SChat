@@ -46,6 +46,7 @@ import { useIdentityStore } from './useIdentityStore';
 export type Conversation = {
   id: string;
   name: string;
+  phone?: string | null;
   avatarColor: string;
   lastMessage: string;
   lastMessageAt: number;
@@ -69,6 +70,8 @@ type ChatState = {
   conversations: Conversation[];
   messagesByConversationId: Record<string, Message[]>;
   activeConversationId: string | null;
+  chatProfileOpen: boolean;
+  activeCall: 'voice' | 'video' | 'meet' | null;
   composing: boolean;
   lookupPending: boolean;
   lookupError: string | null;
@@ -78,6 +81,10 @@ type ChatState = {
   hydrated: boolean;
   openConversation: (id: string) => void;
   closeConversation: () => void;
+  openChatProfile: () => void;
+  closeChatProfile: () => void;
+  startCall: (type: 'voice' | 'video' | 'meet') => void;
+  endCall: () => void;
   sendMessage: (text: string) => Promise<void>;
   openCompose: () => void;
   closeCompose: () => void;
@@ -85,7 +92,9 @@ type ChatState = {
   fetchInbox: () => Promise<void>;
   hydrateChats: () => Promise<void>;
   setConversationVerified: (id: string, verified: boolean) => void;
+  editContact: (id: string, name: string, phone: string) => void;
   deleteConversation: (id: string) => void;
+  deleteMessage: (conversationId: string, messageId: string) => void;
 };
 
 const MIN = 60 * 1000;
@@ -227,6 +236,7 @@ function snapshot(
     conversations: conversations.map<SerializedConversation>((c) => ({
       id: c.id,
       name: c.name,
+      phone: c.phone ?? null,
       avatarColor: c.avatarColor,
       lastMessage: c.lastMessage,
       lastMessageAt: c.lastMessageAt,
@@ -254,6 +264,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   conversations: [],
   messagesByConversationId: {},
   activeConversationId: null,
+  chatProfileOpen: false,
+  activeCall: null,
   composing: false,
   lookupPending: false,
   lookupError: null,
@@ -287,6 +299,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return {
         id: c.id,
         name: c.name,
+        phone: c.phone ?? null,
         avatarColor: c.avatarColor,
         lastMessage: c.lastMessage,
         lastMessageAt: c.lastMessageAt,
@@ -314,6 +327,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ conversations: next });
     persist({ conversations: next, messagesByConversationId });
   },
+  editContact: (id, name, phone) => {
+    const trimmedName = name.trim();
+    if (!trimmedName) return;
+    const trimmedPhone = phone.trim();
+    const { conversations, messagesByConversationId } = get();
+    const next = conversations.map((c) =>
+      c.id === id ? { ...c, name: trimmedName, phone: trimmedPhone || null } : c,
+    );
+    set({ conversations: next });
+    persist({ conversations: next, messagesByConversationId });
+  },
   deleteConversation: (id) => {
     const { conversations, messagesByConversationId, activeConversationId } = get();
     const nextConvs = conversations.filter((c) => c.id !== id);
@@ -323,7 +347,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
       conversations: nextConvs,
       messagesByConversationId: nextMsgs,
       activeConversationId: activeConversationId === id ? null : activeConversationId,
+      chatProfileOpen: activeConversationId === id ? false : get().chatProfileOpen,
+      activeCall: activeConversationId === id ? null : get().activeCall,
     });
+    persist({ conversations: nextConvs, messagesByConversationId: nextMsgs });
+  },
+  deleteMessage: (conversationId, messageId) => {
+    const { conversations, messagesByConversationId } = get();
+    const bucket = messagesByConversationId[conversationId];
+    if (!bucket) return;
+    const nextBucket = bucket.filter((m) => m.id !== messageId);
+    if (nextBucket.length === bucket.length) return;
+    const nextMsgs = { ...messagesByConversationId, [conversationId]: nextBucket };
+    const last = nextBucket[nextBucket.length - 1];
+    const nextConvs = conversations.map((c) =>
+      c.id === conversationId
+        ? {
+            ...c,
+            lastMessage: last ? last.text : '',
+            lastMessageAt: last ? last.sentAt : c.lastMessageAt,
+          }
+        : c,
+    );
+    set({ conversations: nextConvs, messagesByConversationId: nextMsgs });
     persist({ conversations: nextConvs, messagesByConversationId: nextMsgs });
   },
   openConversation: (id) => {
@@ -335,7 +381,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
     void get().fetchInbox();
   },
-  closeConversation: () => set({ activeConversationId: null }),
+  closeConversation: () =>
+    set({ activeConversationId: null, chatProfileOpen: false, activeCall: null }),
+  openChatProfile: () => set({ chatProfileOpen: true }),
+  closeChatProfile: () => set({ chatProfileOpen: false }),
+  startCall: (type) => set({ activeCall: type }),
+  endCall: () => set({ activeCall: null }),
   openCompose: () => set({ composing: true, lookupError: null }),
   closeCompose: () => set({ composing: false, lookupError: null, lookupPending: false }),
   findContact: async (phone) => {

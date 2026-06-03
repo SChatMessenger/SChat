@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.schat.app",
@@ -32,7 +32,17 @@
         {
           "contactsPermission": "Allow $(PRODUCT_NAME) to access your contacts to help you find people to message."
         }
-      ]
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow $(PRODUCT_NAME) to use your location to set your precise account region.",
+          "locationWhenInUsePermission": "Allow $(PRODUCT_NAME) to use your location to set your precise account region.",
+          "isIosBackgroundLocationEnabled": false,
+          "isAndroidBackgroundLocationEnabled": false
+        }
+      ],
+      "react-native-edge-to-edge"
     ],
     "extra": {
       "eas": {

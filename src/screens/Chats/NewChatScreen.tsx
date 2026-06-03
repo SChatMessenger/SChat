@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   FlatList,
   Linking,
@@ -17,6 +17,7 @@ import {
   type EnrichedContact,
 } from '../../store';
 import { useTheme, type Theme } from '../../theme';
+import { useHardwareBack } from '../../hooks';
 
 const ON_SCHAT_GREEN = '#22c55e';
 const ERROR_RED = '#ef4444';
