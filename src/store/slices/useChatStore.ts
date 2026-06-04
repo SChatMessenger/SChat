@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { ApiError, apiBinaryRequest } from '../../services/api/client';
+import { ApiError, apiBinaryRequest, apiJsonPost } from '../../services/api/client';
 import {
   BUNDLE_BYTES,
   deserializeBundle,
@@ -57,11 +57,18 @@ export type Conversation = {
   verified: boolean;
   peerOpk: PeerOpk | null;
   ratchet: RatchetState | null;
+  // Last time we peeked the peer's published identity for session self-heal
+  // (in-memory only; resets on reload so we re-check once after restart).
+  lastKeyCheckAt?: number;
 };
 
 export type Message = {
   id: string;
   author: 'me' | 'them';
+  // Sender's inbox id. Alignment is decided by comparing this to the signed-in
+  // account's inbox (identity-anchored) rather than trusting `author`, which is
+  // only relative to whoever stored the message.
+  from?: string;
   text: string;
   sentAt: number;
 };
@@ -79,6 +86,9 @@ type ChatState = {
   sendError: string | null;
   inboxPending: boolean;
   hydrated: boolean;
+  // Which account's chats are currently loaded in memory (its inbox_id), so a
+  // change of signed-in account triggers a reload instead of showing stale data.
+  loadedAccountId: string | null;
   openConversation: (id: string) => void;
   closeConversation: () => void;
   openChatProfile: () => void;
@@ -91,6 +101,10 @@ type ChatState = {
   findContact: (phone: string) => Promise<void>;
   fetchInbox: () => Promise<void>;
   hydrateChats: () => Promise<void>;
+  // Wipe in-memory chats on sign-out so the next account never sees them. Stays
+  // `hydrated: true` (empty) so the auth UI still renders; the next login
+  // reloads that account's own slot.
+  clearLocal: () => void;
   setConversationVerified: (id: string, verified: boolean) => void;
   editContact: (id: string, name: string, phone: string) => void;
   deleteConversation: (id: string) => void;
@@ -131,6 +145,65 @@ function formatPhoneForLookup(typed: string, myDialCode: string): string {
   if (trimmed.startsWith('+')) return '+' + normalizedPhoneDigits(trimmed);
   return `${myDialCode}${normalizedPhoneDigits(trimmed)}`;
 }
+
+// Fetch a peer's CURRENT prekey bundle (+ claim a fresh one-time prekey) right
+// before starting a session (SudoProto §7.3). Used to refresh a cached bundle so
+// we never bootstrap against stale keys after the peer reinstalled/re-registered.
+// Returns null on any failure (caller falls back to the cached bundle).
+async function lookupPeerBundle(
+  phone: string,
+): Promise<{ inboxId: string; peer: IdentityPublicBundle; peerOpk: PeerOpk | null } | null> {
+  const idState = useIdentityStore.getState();
+  const token = idState.token;
+  if (!token || !phone.trim()) return null;
+  const lookupFull = formatPhoneForLookup(phone, idState.dialCode);
+  try {
+    const bytes = await apiBinaryRequest(
+      'GET',
+      `/users/lookup?phone=${encodeURIComponent(lookupFull)}`,
+      undefined,
+      token,
+    );
+    const parsed = parseLookupResponse(bytes);
+    if (!parsed || !verifyBundleSignature(parsed.peer)) return null;
+    const opkValid =
+      parsed.peerOpk != null &&
+      ed25519Verify(parsed.peer.ed25519Pub, parsed.peerOpk.pub, parsed.peerOpk.sig);
+    return {
+      inboxId: parsed.inboxId,
+      peer: parsed.peer,
+      peerOpk: opkValid ? parsed.peerOpk : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Read-only peek of a peer's current identity bundle (GET /users/bundle) — does
+// NOT claim an OPK. Used to detect a peer that re-registered (session self-heal).
+async function peekPeerBundle(phone: string): Promise<IdentityPublicBundle | null> {
+  const idState = useIdentityStore.getState();
+  const token = idState.token;
+  if (!token || !phone.trim()) return null;
+  const lookupFull = formatPhoneForLookup(phone, idState.dialCode);
+  try {
+    const bytes = await apiBinaryRequest(
+      'GET',
+      `/users/bundle?phone=${encodeURIComponent(lookupFull)}`,
+      undefined,
+      token,
+    );
+    const parsed = parseLookupResponse(bytes);
+    if (!parsed || !verifyBundleSignature(parsed.peer)) return null;
+    return parsed.peer;
+  } catch {
+    return null;
+  }
+}
+
+// How often (at most) the sender re-checks a peer's identity before sending into
+// an existing session.
+const KEY_CHECK_INTERVAL_MS = 60_000;
 
 function readU8(buf: Uint8Array, off: number): { value: number; next: number } {
   return { value: buf[off], next: off + 1 };
@@ -254,8 +327,74 @@ function snapshot(
   };
 }
 
+// The first (bootstrap) message carries everything a brand-new recipient needs
+// to materialize the conversation — the sender's reply inbox, phone (for the
+// chat title) and kyber key — packed INSIDE the encrypted bootstrap body, never
+// in the wire header. Layout (all lengths u16 LE):
+//   [inboxLen][inbox][phoneLen][phone][kyberLen][kyberPub][message…]
+function encodeBootstrapPayload(
+  inboxId: string,
+  phone: string,
+  kyberPub: Uint8Array,
+  message: Uint8Array,
+): Uint8Array {
+  const inbox = utf8Encode(inboxId);
+  const ph = utf8Encode(phone);
+  const out = new Uint8Array(
+    2 + inbox.length + 2 + ph.length + 2 + kyberPub.length + message.length,
+  );
+  let o = 0;
+  const w16 = (v: number) => {
+    out[o++] = v & 0xff;
+    out[o++] = (v >>> 8) & 0xff;
+  };
+  const wbuf = (b: Uint8Array) => {
+    out.set(b, o);
+    o += b.length;
+  };
+  w16(inbox.length);
+  wbuf(inbox);
+  w16(ph.length);
+  wbuf(ph);
+  w16(kyberPub.length);
+  wbuf(kyberPub);
+  wbuf(message);
+  return out;
+}
+
+type BootstrapPayload = {
+  inboxId: string;
+  phone: string;
+  kyberPub: Uint8Array;
+  message: Uint8Array;
+};
+
+function decodeBootstrapPayload(buf: Uint8Array): BootstrapPayload | null {
+  let o = 0;
+  const r16 = (): number | null => {
+    if (o + 2 > buf.length) return null;
+    const v = buf[o] | (buf[o + 1] << 8);
+    o += 2;
+    return v;
+  };
+  const inboxLen = r16();
+  if (inboxLen === null || o + inboxLen > buf.length) return null;
+  const inboxId = utf8Decode(buf.subarray(o, (o += inboxLen)));
+  const phoneLen = r16();
+  if (phoneLen === null || o + phoneLen > buf.length) return null;
+  const phone = utf8Decode(buf.subarray(o, (o += phoneLen)));
+  const kyberLen = r16();
+  if (kyberLen === null || o + kyberLen > buf.length) return null;
+  const kyberPub = new Uint8Array(buf.subarray(o, (o += kyberLen)));
+  const message = new Uint8Array(buf.subarray(o));
+  if (!inboxId) return null;
+  return { inboxId, phone, kyberPub, message };
+}
+
 function persist(state: { conversations: Conversation[]; messagesByConversationId: Record<string, Message[]> }) {
-  void saveChats(snapshot(state.conversations, state.messagesByConversationId)).catch((e) =>
+  const accountId = useIdentityStore.getState().inboxId;
+  if (!accountId) return; // no signed-in account → nothing to persist against
+  void saveChats(accountId, snapshot(state.conversations, state.messagesByConversationId)).catch((e) =>
     console.warn('chat persist failed', e),
   );
 }
@@ -273,15 +412,50 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sendError: null,
   inboxPending: false,
   hydrated: false,
+  loadedAccountId: null,
+  clearLocal: () =>
+    set({
+      conversations: [],
+      messagesByConversationId: {},
+      activeConversationId: null,
+      chatProfileOpen: false,
+      activeCall: null,
+      composing: false,
+      loadedAccountId: null,
+      hydrated: true,
+    }),
   hydrateChats: async () => {
-    if (get().hydrated) return;
-    const loaded = await loadChats();
-    if (!loaded) {
-      set({ hydrated: true });
+    // Make sure we know who's signed in before choosing a storage slot.
+    await useIdentityStore.getState().hydrateFromStorage();
+    const myInbox = useIdentityStore.getState().inboxId;
+
+    // Already showing the right account's chats — nothing to do.
+    if (get().hydrated && get().loadedAccountId === (myInbox ?? null)) return;
+
+    // No signed-in account (e.g. just signed out): clear memory, stay loaded.
+    if (!myInbox) {
+      set({
+        conversations: [],
+        messagesByConversationId: {},
+        activeConversationId: null,
+        loadedAccountId: null,
+        hydrated: true,
+      });
       return;
     }
-    const myInbox = useIdentityStore.getState().inboxId;
-    const filtered = loaded.conversations.filter((c) => !myInbox || c.id !== myInbox);
+
+    const loaded = await loadChats(myInbox);
+    if (!loaded) {
+      set({
+        conversations: [],
+        messagesByConversationId: {},
+        activeConversationId: null,
+        loadedAccountId: myInbox,
+        hydrated: true,
+      });
+      return;
+    }
+    const filtered = loaded.conversations.filter((c) => c.id !== myInbox);
     const filteredMessages: Record<string, Message[]> = {};
     for (const c of filtered) {
       if (loaded.messages?.[c.id]) filteredMessages[c.id] = loaded.messages[c.id];
@@ -315,6 +489,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       conversations,
       messagesByConversationId: filteredMessages,
+      loadedAccountId: myInbox,
       hydrated: true,
     });
     if (filtered.length !== loaded.conversations.length) {
@@ -507,31 +682,73 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ sendError: 'Recipient has no keys yet.' });
       return;
     }
-    const { token, identity } = useIdentityStore.getState();
+    const { token, identity, inboxId: myInbox, phone: myPhone } = useIdentityStore.getState();
     if (!token || !identity) {
       set({ sendError: 'Not signed in.' });
       return;
     }
 
     const pt = utf8Encode(trimmed);
+    const now = Date.now();
     let frame: Uint8Array;
     let nextRatchet: RatchetState;
     let consumedOpk = false;
-    if (!conversation.ratchet) {
-      const boot = bootstrapAsInitiator(pt, conversation.peer, identity, conversation.peerOpk);
-      frame = boot.frame;
-      nextRatchet = boot.state;
-      consumedOpk = !!conversation.peerOpk;
-    } else {
-      frame = sealNext(conversation.ratchet, pt, identity);
-      nextRatchet = conversation.ratchet;
+    // Carry the (possibly refreshed) bundle so it gets stored on the conversation.
+    let peer = conversation.peer;
+    let peerOpk = conversation.peerOpk;
+    let bootstrap = !conversation.ratchet;
+    let keyCheckedAt = conversation.lastKeyCheckAt;
+
+    // Session self-heal: before sending into an existing ratchet, cheaply peek
+    // the peer's published identity (throttled). If their identity key changed,
+    // they reinstalled — drop the stale ratchet and re-bootstrap so messages
+    // decrypt again, without the user having to delete the chat.
+    if (
+      conversation.ratchet &&
+      conversation.phone &&
+      (!conversation.lastKeyCheckAt || now - conversation.lastKeyCheckAt > KEY_CHECK_INTERVAL_MS)
+    ) {
+      keyCheckedAt = now;
+      const current = await peekPeerBundle(conversation.phone);
+      if (current && !bytesEqual(current.x25519Pub, conversation.peer.x25519Pub)) {
+        bootstrap = true; // peer re-registered → re-establish the session
+      }
     }
 
-    const sentAt = Date.now();
+    if (bootstrap) {
+      // Starting/re-establishing a session: fetch the recipient's CURRENT bundle
+      // + a fresh OPK (SudoProto §7.3) so we don't encrypt to dead keys (the
+      // "OPK/keys mismatch" failure). Fall back to the cached bundle if offline.
+      if (conversation.phone) {
+        const fresh = await lookupPeerBundle(conversation.phone);
+        if (fresh) {
+          peer = fresh.peer;
+          peerOpk = fresh.peerOpk;
+        }
+      }
+      // First message: bundle our reply inbox + phone + kyber key so the
+      // recipient can create the conversation even if they've never added us.
+      const payload = encodeBootstrapPayload(
+        myInbox ?? '',
+        myPhone ?? '',
+        identity.kyber.pub,
+        pt,
+      );
+      const boot = bootstrapAsInitiator(payload, peer, identity, peerOpk);
+      frame = boot.frame;
+      nextRatchet = boot.state;
+      consumedOpk = !!peerOpk;
+    } else {
+      frame = sealNext(conversation.ratchet!, pt, identity);
+      nextRatchet = conversation.ratchet!;
+    }
+
+    const sentAt = now;
     const localId = `local-${sentAt}-${hex(frame.subarray(1, 9))}`;
     const optimistic: Message = {
       id: localId,
       author: 'me',
+      from: myInbox ?? undefined,
       text: trimmed,
       sentAt,
     };
@@ -546,10 +763,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       c.id === activeConversationId
         ? {
             ...c,
+            peer,
             lastMessage: trimmed,
             lastMessageAt: sentAt,
             ratchet: nextRatchet,
-            peerOpk: consumedOpk ? null : c.peerOpk,
+            peerOpk: consumedOpk ? null : peerOpk,
+            lastKeyCheckAt: keyCheckedAt,
           }
         : c,
     );
@@ -565,8 +784,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await apiBinaryRequest('POST', '/messages', frame, token, {
         'X-Inbox-Id': conversation.id,
       });
+      console.log(
+        '[send] posted',
+        bootstrap ? 'bootstrap' : 'ratchet',
+        'frame',
+        frame.length,
+        'bytes -> inbox',
+        conversation.id,
+      );
       set({ sendPending: false });
     } catch (e) {
+      console.warn('[send] failed', e);
       const msg = e instanceof ApiError ? e.message : 'Send failed.';
       set({ sendPending: false, sendError: msg });
     }
@@ -574,28 +802,106 @@ export const useChatStore = create<ChatState>((set, get) => ({
   fetchInbox: async () => {
     const { inboxPending } = get();
     if (inboxPending) return;
-    const { token, identity } = useIdentityStore.getState();
-    if (!token || !identity) return;
+    const { token, identity, userId } = useIdentityStore.getState();
+    if (!token || !identity || !userId) return;
     set({ inboxPending: true });
     try {
       const bytes = await apiBinaryRequest('GET', '/messages?limit=200', undefined, token);
       const rows = parseInboxStream(bytes);
+      // Server returns newest-first; process oldest-first so a bootstrap is
+      // handled before the ratchet replies that depend on its conversation.
+      rows.sort((a, b) => a.createdAtMs - b.createdAtMs);
+      console.log('[inbox] fetched', rows.length, 'rows for user', userId);
       let { conversations, messagesByConversationId } = get();
       const nextBuckets: Record<string, Message[]> = { ...messagesByConversationId };
       let conversationsMutated = false;
 
+      // The server keeps delivered messages, so each poll re-returns them. Skip
+      // any we've already stored — re-decrypting a consumed bootstrap would just
+      // fail (its one-time prekey is gone) and burn cycles.
+      const delivered = new Set<string>();
+      for (const msgs of Object.values(nextBuckets)) {
+        for (const m of msgs) delivered.add(m.id);
+      }
+
       let opksConsumed = 0;
+      // Server-side cleanup: ids to delete from the inbox after this pass —
+      // anything we've fully handled, plus permanently-undeliverable bootstraps
+      // (junk that would otherwise be re-fetched forever). Ratchet failures are
+      // left in place (a missing conversation may arrive out of order).
+      const ackIds: string[] = [];
       for (const row of rows) {
+        if (delivered.has(`wire-${row.id}`)) {
+          ackIds.push(row.id);
+          continue;
+        }
         const v = peekVersion(row.frame);
         if (v === FRAME_BOOTSTRAP) {
           const res = bootstrapAsResponder(row.frame, identity);
-          if (!res) continue;
-          let conv = conversations.find(
-            (c) => c.peer && bytesEqual(c.peer.x25519Pub, res.senderX25519Pub),
-          );
-          if (!conv) continue;
-          conv = { ...conv, ratchet: res.state };
-          conversations = conversations.map((c) => (c.id === conv!.id ? conv! : c));
+          if (!res) {
+            console.warn('[inbox] DROP bootstrap: decrypt failed (OPK/keys mismatch)', row.id);
+            ackIds.push(row.id);
+            continue;
+          }
+          const meta = decodeBootstrapPayload(res.plaintext);
+          if (!meta) {
+            console.warn('[inbox] DROP bootstrap: payload decode failed (old format?)', row.id);
+            ackIds.push(row.id);
+            continue;
+          }
+
+          // Reconstruct the sender's bundle: kyber key from the encrypted body,
+          // the rest from the frame's authenticated header. Verify before trust.
+          const peer: IdentityPublicBundle = {
+            x25519Pub: res.senderX25519Pub,
+            kyberPub: meta.kyberPub,
+            ed25519Pub: res.senderEd25519Pub,
+            signedPrekeyPub: res.senderSpkPub,
+            signedPrekeySig: res.senderSpkSig,
+          };
+          if (!verifyBundleSignature(peer)) {
+            console.warn('[inbox] DROP bootstrap: sender bundle signature invalid', row.id);
+            ackIds.push(row.id);
+            continue;
+          }
+
+          // Match an existing conversation by the sender's reply inbox (or a
+          // peer we already added); otherwise auto-create one (first contact).
+          let conv =
+            conversations.find((c) => c.id === meta.inboxId) ??
+            conversations.find(
+              (c) => c.peer && bytesEqual(c.peer.x25519Pub, res.senderX25519Pub),
+            );
+          if (conv) {
+            console.log('[inbox] bootstrap matched existing conv', conv.id);
+            conv = { ...conv, peer: conv.peer ?? peer, ratchet: res.state };
+            conversations = conversations.map((c) => (c.id === conv!.id ? conv! : c));
+          } else {
+            console.log('[inbox] bootstrap auto-create conv', meta.inboxId, meta.phone);
+            const myPub: IdentityPublicBundle = {
+              x25519Pub: identity.x25519.pub,
+              kyberPub: identity.kyber.pub,
+              ed25519Pub: identity.ed25519.pub,
+              signedPrekeyPub: identity.signedPrekey.pub,
+              signedPrekeySig: identity.signedPrekey.sig,
+            };
+            conv = {
+              id: meta.inboxId,
+              name: meta.phone || 'New contact',
+              phone: meta.phone || null,
+              avatarColor: pickAvatarColor(meta.inboxId),
+              lastMessage: '',
+              lastMessageAt: row.createdAtMs,
+              unreadCount: 0,
+              peer,
+              peerFingerprint: identityFingerprint(peer),
+              safetyNumber: safetyNumberBetween(myPub, peer),
+              verified: false,
+              peerOpk: null,
+              ratchet: res.state,
+            };
+            conversations = [...conversations, conv];
+          }
           conversationsMutated = true;
           opksConsumed += 1;
 
@@ -605,11 +911,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
             bucket.push({
               id: msgId,
               author: 'them',
-              text: utf8Decode(res.plaintext),
+              from: conv.id,
+              text: utf8Decode(meta.message),
               sentAt: row.createdAtMs,
             });
             nextBuckets[conv.id] = bucket;
           }
+          ackIds.push(row.id);
         } else if (v === FRAME_RATCHET) {
           const conv = conversations.find(
             (c) =>
@@ -623,9 +931,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ),
               ),
           );
-          if (!conv || !conv.ratchet) continue;
+          if (!conv || !conv.ratchet) {
+            // We process oldest-first, so if no conversation exists by now the
+            // establishing bootstrap isn't in the inbox (it'd be older, hence
+            // fetched first) — this ratchet is orphaned (bootstrap already
+            // cleared, or the peer's session was reset). Drop it server-side so
+            // it stops re-spamming every poll.
+            console.warn('[inbox] DROP ratchet: orphaned (no bootstrap)', row.id);
+            ackIds.push(row.id);
+            continue;
+          }
           const opened = openNext(conv.ratchet, row.frame);
-          if (!opened) continue;
+          if (!opened) {
+            console.warn('[inbox] DROP ratchet: decrypt failed', row.id);
+            continue;
+          }
           conversationsMutated = true;
 
           const msgId = `wire-${row.id}`;
@@ -634,11 +954,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
             bucket.push({
               id: msgId,
               author: 'them',
+              from: conv.id,
               text: utf8Decode(opened.plaintext),
               sentAt: row.createdAtMs,
             });
             nextBuckets[conv.id] = bucket;
           }
+          ackIds.push(row.id);
+        } else {
+          console.warn('[inbox] DROP: unknown frame version', v, row.id);
+          ackIds.push(row.id);
         }
       }
 
@@ -663,11 +988,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         persist({ conversations: finalConversations, messagesByConversationId: nextBuckets });
       }
       if (opksConsumed > 0) {
-        void saveIdentity(identity).catch((e) => console.warn('opk persist failed', e));
+        void saveIdentity(userId, identity).catch((e) => console.warn('opk persist failed', e));
         void useIdentityStore.getState().refillOpksIfLow();
       }
-    } catch {
-      // silent; UI keeps prior state
+      // Tell the server to drop everything we've handled so it isn't
+      // re-delivered on the next poll (and clears undeliverable junk).
+      if (ackIds.length > 0) {
+        console.log('[inbox] ack', ackIds.length, 'messages');
+        void apiJsonPost('/messages/ack', { ids: ackIds }, token).catch((e) =>
+          console.warn('[inbox] ack failed', e),
+        );
+      }
+    } catch (e) {
+      console.warn('[inbox] fetch error', e);
     } finally {
       set({ inboxPending: false });
     }

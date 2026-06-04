@@ -12,15 +12,15 @@ import { useTheme } from '../../theme';
 
 const ERROR_RED = '#ef4444';
 
-export function MpinScreen() {
+export function ResetPasscodeScreen() {
   const theme = useTheme();
-  const mpin = useIdentityStore((s) => s.mpin);
-  const mpinExists = useIdentityStore((s) => s.mpinExists);
+  const phone = useIdentityStore((s) => s.phone);
+  const code = useIdentityStore((s) => s.code);
   const pending = useIdentityStore((s) => s.pending);
   const error = useIdentityStore((s) => s.error);
-  const setMpin = useIdentityStore((s) => s.setMpin);
-  const submitMpin = useIdentityStore((s) => s.submitMpin);
-  const goBack = useIdentityStore((s) => s.goBack);
+  const setCode = useIdentityStore((s) => s.setCode);
+  const submitPasscodeReset = useIdentityStore((s) => s.submitPasscodeReset);
+  const cancelPasscodeReset = useIdentityStore((s) => s.cancelPasscodeReset);
 
   return (
     <KeyboardAvoidingView
@@ -29,7 +29,7 @@ export function MpinScreen() {
     >
       <View style={[styles.container, { padding: theme.spacing.lg }]}>
         <Text style={[theme.typography.title, { color: theme.colors.text }]}>
-          {mpinExists ? 'Enter your MPIN' : 'Set your MPIN'}
+          Reset passcode
         </Text>
         <Text
           style={[
@@ -37,18 +37,16 @@ export function MpinScreen() {
             { color: theme.colors.textMuted, marginTop: theme.spacing.sm },
           ]}
         >
-          {mpinExists
-            ? 'Welcome back. Enter your MPIN to finish signing in.'
-            : 'Choose a 4-6 digit MPIN to protect sign-in on this device.'}
+          We sent a new code to {phone || 'your phone'}. Enter it to remove your
+          passcode — you can set a new one later in Settings.
         </Text>
 
         <TextInput
-          value={mpin}
-          onChangeText={setMpin}
-          placeholder="••••"
+          value={code}
+          onChangeText={setCode}
+          placeholder="123456"
           placeholderTextColor={theme.colors.textMuted}
           keyboardType="number-pad"
-          secureTextEntry
           autoFocus
           editable={!pending}
           maxLength={6}
@@ -80,7 +78,7 @@ export function MpinScreen() {
         ) : null}
 
         <Pressable
-          onPress={submitMpin}
+          onPress={submitPasscodeReset}
           disabled={pending}
           style={({ pressed }) => [
             {
@@ -94,12 +92,12 @@ export function MpinScreen() {
           ]}
         >
           <Text style={[theme.typography.body, { color: theme.colors.onPrimary }]}>
-            {pending ? 'Checking…' : mpinExists ? 'Unlock' : 'Set MPIN'}
+            {pending ? 'Verifying…' : 'Reset passcode'}
           </Text>
         </Pressable>
 
         <Pressable
-          onPress={goBack}
+          onPress={cancelPasscodeReset}
           disabled={pending}
           style={({ pressed }) => [
             {
@@ -111,7 +109,7 @@ export function MpinScreen() {
           ]}
         >
           <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-            Change number
+            Cancel
           </Text>
         </Pressable>
       </View>

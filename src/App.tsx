@@ -4,6 +4,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as SystemUI from 'expo-system-ui';
 import { IdentityScreen } from './screens/Auth';
 import { AppNavigator } from './navigation';
+import { setUnauthorizedHandler } from './services/api/client';
 import {
   useAppStore,
   useBootStore,
@@ -63,6 +64,7 @@ function ThemedRoot({ children }: { children: React.ReactNode }) {
 function AppContent() {
   const phase = useBootStore((s) => s.phase);
   const idHydrated = useIdentityStore((s) => s.hydrated);
+  const inboxId = useIdentityStore((s) => s.inboxId);
   const hydrateFromStorage = useIdentityStore((s) => s.hydrateFromStorage);
   const chatsHydrated = useChatStore((s) => s.hydrated);
   const hydrateChats = useChatStore((s) => s.hydrateChats);
@@ -71,9 +73,26 @@ function AppContent() {
 
   useEffect(() => {
     void hydrateFromStorage();
-    void hydrateChats();
     void hydrateProfile();
-  }, [hydrateFromStorage, hydrateChats, hydrateProfile]);
+  }, [hydrateFromStorage, hydrateProfile]);
+
+  // Load (and reload on account switch) the signed-in account's own chat slot.
+  // Keying on inboxId means signing in as a different number swaps chats instead
+  // of leaking the previous account's conversations.
+  useEffect(() => {
+    void hydrateChats();
+  }, [hydrateChats, inboxId]);
+
+  // Session-expired handling: a 401 on any authenticated request signs out and
+  // returns to the auth screen (identity keys are kept, so re-login reuses them).
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      if (!useIdentityStore.getState().token) return;
+      useIdentityStore.getState().sessionExpired();
+      useBootStore.getState().reset();
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (s) => {

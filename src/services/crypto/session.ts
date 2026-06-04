@@ -38,8 +38,10 @@ export const BOOTSTRAP_HEADER_BYTES =
   X25519_KEY_BYTES +
   ED25519_SIG_BYTES;
 
-const PQXDH_INFO_SPK = utf8Encode('schat/v1 pqxdh spk-only x25519+mlkem1024 hkdf-sha512');
-const PQXDH_INFO_OPK = utf8Encode('schat/v1 pqxdh spk+opk x25519+mlkem1024 hkdf-sha512');
+// v2: root key now folds the proven c1 = DH(IK_A, SPK_B) identity-binding leg
+// (SudoProto/Tamarin `kci_resistance`, `responder_bundle_authentication`).
+const PQXDH_INFO_SPK = utf8Encode('schat/v2 pqxdh ik+spk x25519+mlkem1024 hkdf-sha512');
+const PQXDH_INFO_OPK = utf8Encode('schat/v2 pqxdh ik+spk+opk x25519+mlkem1024 hkdf-sha512');
 const BOOTSTRAP_AEAD_INFO = utf8Encode('schat/v1 bootstrap-aead');
 const ZERO_SALT = new Uint8Array(64);
 const PQXDH_OKM_LEN = 64;
@@ -66,11 +68,14 @@ export type IdentitySecretBundle = {
 export type PeerOpk = { id: number; pub: Uint8Array; sig: Uint8Array };
 
 function pqxdhDerive(
+  ssIk: Uint8Array,
   ssDh1: Uint8Array,
   ssDh2: Uint8Array | null,
   ssPq: Uint8Array,
 ): { rootKey: Uint8Array; bootstrapAeadKey: Uint8Array } {
-  const ikm = ssDh2 ? concat(ssDh1, ssDh2, ssPq) : concat(ssDh1, ssPq);
+  // Order matches both sides: c1 = DH(IK_A, SPK_B) ‖ DH(EK_A, SPK_B) ‖
+  // [DH(EK_A, OPK_B)] ‖ ML-KEM secret. ssIk is the proven identity-binding leg.
+  const ikm = ssDh2 ? concat(ssIk, ssDh1, ssDh2, ssPq) : concat(ssIk, ssDh1, ssPq);
   const info = ssDh2 ? PQXDH_INFO_OPK : PQXDH_INFO_SPK;
   const okm = hkdfDerive(ikm, ZERO_SALT, info, PQXDH_OKM_LEN);
   zeroize(ikm);
@@ -120,6 +125,7 @@ export type PqxdhInitiateResult = {
 
 export function pqxdhInitiate(
   recipient: IdentityPublicBundle,
+  sender: IdentitySecretBundle,
   recipientOpk: PeerOpk | null,
 ): PqxdhInitiateResult {
   if (recipient.x25519Pub.length !== X25519_KEY_BYTES) {
@@ -132,14 +138,16 @@ export function pqxdhInitiate(
     throw new Error('recipient SPK pub size');
   }
   const ephem = x25519KeyGen();
+  // c1 = DH(IK_A, SPK_B): binds the initiator's long-term identity (proven leg).
+  const ssIk = x25519Dh(sender.x25519.sec, recipient.signedPrekeyPub);
   const ssDh1 = x25519Dh(ephem.sec, recipient.signedPrekeyPub);
   const ssDh2 = recipientOpk ? x25519Dh(ephem.sec, recipientOpk.pub) : null;
   const kem = kyberEncap(recipient.kyberPub);
   if (ssDh1.length !== SHARED_SECRET_BYTES || kem.ss.length !== SHARED_SECRET_BYTES) {
     throw new Error('shared secret size');
   }
-  const { rootKey, bootstrapAeadKey } = pqxdhDerive(ssDh1, ssDh2, kem.ss);
-  zeroize(ssDh1, kem.ss);
+  const { rootKey, bootstrapAeadKey } = pqxdhDerive(ssIk, ssDh1, ssDh2, kem.ss);
+  zeroize(ssIk, ssDh1, kem.ss);
   if (ssDh2) zeroize(ssDh2);
   return {
     rootKey,
@@ -152,22 +160,26 @@ export function pqxdhInitiate(
 
 export function pqxdhRespond(
   recipient: IdentitySecretBundle,
+  senderIdPub: Uint8Array,
   ephemPub: Uint8Array,
   kyberCt: Uint8Array,
   opkSecret: OpkSecret | null,
 ): { rootKey: Uint8Array; aeadKey: Uint8Array } | null {
+  let ssIk: Uint8Array;
   let ssDh1: Uint8Array;
   let ssPq: Uint8Array;
   let ssDh2: Uint8Array | null = null;
   try {
+    // c1 = DH(SPK_B, IK_A) == initiator's DH(IK_A, SPK_B).
+    ssIk = x25519Dh(recipient.signedPrekey.sec, senderIdPub);
     ssDh1 = x25519Dh(recipient.signedPrekey.sec, ephemPub);
     if (opkSecret) ssDh2 = x25519Dh(opkSecret.sec, ephemPub);
     ssPq = kyberDecap(kyberCt, recipient.kyber.sec);
   } catch {
     return null;
   }
-  const { rootKey, bootstrapAeadKey } = pqxdhDerive(ssDh1, ssDh2, ssPq);
-  zeroize(ssDh1, ssPq);
+  const { rootKey, bootstrapAeadKey } = pqxdhDerive(ssIk, ssDh1, ssDh2, ssPq);
+  zeroize(ssIk, ssDh1, ssPq);
   if (ssDh2) zeroize(ssDh2);
   return { rootKey, aeadKey: bootstrapAeadKey };
 }
@@ -186,7 +198,7 @@ export function sealBootstrap(
   sender: IdentitySecretBundle,
   recipientOpk: PeerOpk | null,
 ): BootstrapSealed {
-  const init = pqxdhInitiate(recipient, recipientOpk);
+  const init = pqxdhInitiate(recipient, sender, recipientOpk);
   const nonce = randomBytes(AEAD_NONCE_BYTES);
   const opkId = recipientOpk?.id ?? 0;
   const associated = bootstrapAad(
@@ -264,7 +276,7 @@ export function openBootstrap(
 
   const opkSecret = opkId !== 0 ? resolveOpkSecret(opkId) : null;
 
-  const r = pqxdhRespond(recipient, ephemPub, kyberCt, opkSecret);
+  const r = pqxdhRespond(recipient, senderIdPub, ephemPub, kyberCt, opkSecret);
   if (!r) return null;
 
   const associated = bootstrapAad(opkId, senderIdPub, senderEd25519Pub, senderSpkPub, senderSpkSig);

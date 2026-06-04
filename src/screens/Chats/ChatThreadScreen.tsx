@@ -3,6 +3,7 @@ import {
   Alert,
   Animated,
   FlatList,
+  I18nManager,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -16,7 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { BlurView } from 'expo-blur';
 import { Iconify } from 'react-native-iconify';
-import { useChatStore, type Conversation, type Message } from '../../store';
+import { useChatStore, useIdentityStore, type Conversation, type Message } from '../../store';
 import { useTheme, type Theme } from '../../theme';
 import { useHardwareBack } from '../../hooks';
 import { BottomSheet, IconButton } from '../../components';
@@ -25,6 +26,11 @@ const VERIFIED_GREEN = '#22c55e';
 const UNVERIFIED_AMBER = '#f59e0b';
 const DANGER_RED = '#ef4444';
 const EMPTY_MESSAGES: Message[] = [];
+
+// Physical placement that ignores RTL mirroring, so sent bubbles are always on
+// the right and received on the left even when the device language is RTL.
+const ALIGN_RIGHT: 'flex-start' | 'flex-end' = I18nManager.isRTL ? 'flex-start' : 'flex-end';
+const ALIGN_LEFT: 'flex-start' | 'flex-end' = I18nManager.isRTL ? 'flex-end' : 'flex-start';
 
 type SheetAction = {
   key: string;
@@ -57,6 +63,7 @@ export function ChatThreadScreen() {
         ? s.messagesByConversationId[s.activeConversationId]
         : undefined) ?? EMPTY_MESSAGES,
   );
+  const myInbox = useIdentityStore((s) => s.inboxId);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const closeConversation = useChatStore((s) => s.closeConversation);
   const openChatProfile = useChatStore((s) => s.openChatProfile);
@@ -340,9 +347,28 @@ export function ChatThreadScreen() {
             paddingTop: navH + theme.spacing.sm,
             paddingBottom: insets.bottom + 72,
           }}
-          renderItem={({ item }) => (
-            <Bubble message={item} theme={theme} onSelect={() => setSelected(item)} />
-          )}
+          renderItem={({ item, index }) => {
+            const prev = index > 0 ? messages[index - 1] : null;
+            const showDay = !prev || !sameDay(prev.sentAt, item.sentAt);
+            // Name only at the start of a received run (or after a day break).
+            const showName =
+              item.author === 'them' && (showDay || !prev || prev.author !== 'them');
+            return (
+              <View style={{ width: '100%' }}>
+                {showDay ? (
+                  <DaySeparator label={formatDayLabel(item.sentAt)} theme={theme} />
+                ) : null}
+                <Bubble
+                  message={item}
+                  theme={theme}
+                  myInbox={myInbox}
+                  senderName={showName ? conversation.name : null}
+                  time={formatClock(item.sentAt)}
+                  onSelect={() => setSelected(item)}
+                />
+              </View>
+            );
+          }}
           onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
         />
 
@@ -703,19 +729,31 @@ const modalStyles = StyleSheet.create({
 function Bubble({
   message,
   theme,
+  myInbox,
+  senderName,
+  time,
   onSelect,
 }: {
   message: Message;
   theme: Theme;
+  myInbox?: string | null;
+  // Shown only on received bubbles, and only at the start of a received run.
+  senderName?: string | null;
+  time: string;
   onSelect: () => void;
 }) {
-  const mine = message.author === 'me';
+  // Identity-anchored: mine iff the message's sender inbox is my inbox. Falls
+  // back to the legacy `author` flag for messages saved before `from` existed.
+  const mine =
+    message.from != null && myInbox != null
+      ? message.from === myInbox
+      : message.author === 'me';
   return (
     <View
       style={[
         styles.bubbleRow,
         {
-          justifyContent: mine ? 'flex-end' : 'flex-start',
+          alignItems: mine ? ALIGN_RIGHT : ALIGN_LEFT,
           marginVertical: theme.spacing.xs,
         },
       ]}
@@ -738,6 +776,17 @@ function Bubble({
           },
         ]}
       >
+        {senderName ? (
+          <Text
+            numberOfLines={1}
+            style={[
+              theme.typography.caption,
+              { color: theme.colors.primary, fontWeight: '700', marginBottom: 2 },
+            ]}
+          >
+            {senderName}
+          </Text>
+        ) : null}
         <Text
           style={[
             theme.typography.body,
@@ -746,10 +795,64 @@ function Bubble({
         >
           {message.text}
         </Text>
+        <Text
+          style={[
+            styles.timeText,
+            {
+              alignSelf: ALIGN_RIGHT,
+              color: mine ? theme.colors.onPrimary : theme.colors.textMuted,
+              opacity: mine ? 0.75 : 1,
+            },
+          ]}
+        >
+          {time}
+        </Text>
       </Pressable>
     </View>
   );
 }
+
+function DaySeparator({ label, theme }: { label: string; theme: Theme }) {
+  return (
+    <View style={daySepStyles.wrap}>
+      <View style={[daySepStyles.pill, { backgroundColor: theme.colors.surface }]}>
+        <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
+          {label}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function startOfDay(ts: number): number {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function sameDay(a: number, b: number): boolean {
+  return startOfDay(a) === startOfDay(b);
+}
+
+function formatDayLabel(ts: number): string {
+  const diffDays = (startOfDay(Date.now()) - startOfDay(ts)) / 86_400_000;
+  if (diffDays === 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  return new Date(ts).toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+function formatClock(ts: number): string {
+  return new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+const daySepStyles = StyleSheet.create({
+  wrap: { alignItems: 'center', marginVertical: 8 },
+  pill: { paddingHorizontal: 12, paddingVertical: 4, borderRadius: 999 },
+});
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
@@ -809,8 +912,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  bubbleRow: { flexDirection: 'row' },
+  // Full-width column; alignItems places the bubble left (received) or right
+  // (sent). More robust than justifyContent-on-a-row.
+  bubbleRow: { width: '100%' },
   bubble: { maxWidth: '80%' },
+  timeText: { fontSize: 10, marginTop: 2, alignSelf: 'flex-end' },
 });
 
 // Soft drop shadow lifting the floating glass input bar off the content.

@@ -18,27 +18,31 @@ import {
   serializeOpkUpload,
 } from '../../services/crypto/prekeys';
 import {
-  clearChats,
-  clearIdentity,
-  clearPasscode,
   clearSession,
-  hasPasscode,
   loadIdentity,
   loadSession,
+  passcodeHash,
   saveIdentity,
-  savePasscode,
   saveSession,
-  verifyPasscode,
 } from '../../services/crypto/persist';
 import type { IdentitySecretBundle } from '../../services/crypto/session';
 import { useAppStore } from './useAppStore';
 import { useBootStore } from './useBootStore';
+import { useChatStore } from './useChatStore';
 
-// Linear sign-in flow:
-//   phone → code → (new account)          profile  → welcome → app
-//                  (existing, passcode on) passcode → welcome → app
-//                  (existing, passcode off)           welcome → app
-type IdentityStep = 'phone' | 'code' | 'profile' | 'passcode' | 'welcome';
+// Linear sign-in flow (passcode is the account's server-side two-step PIN):
+//   phone → code → (new account)               profile  → welcome → app
+//                  (existing, has_passcode=true) passcode → welcome → app
+//                  (existing, has_passcode=false)          welcome → app
+// 'passcodeReset' is the Forgot-passcode detour off 'passcode': a fresh OTP
+// clears the account passcode, then → welcome.
+type IdentityStep =
+  | 'phone'
+  | 'code'
+  | 'profile'
+  | 'passcode'
+  | 'passcodeReset'
+  | 'welcome';
 
 type IdentityState = {
   step: IdentityStep;
@@ -57,10 +61,8 @@ type IdentityState = {
   username: string;
   firstName: string;
   lastName: string;
-  // Passcode entry buffer + whether this device already has a passcode set
-  // (enter vs create-on-first-use), used on the 'passcode' step.
+  // Passcode entry buffer, used on the 'passcode' step (verify against server).
   passcode: string;
-  passcodeExists: boolean;
   setPhone: (phone: string) => void;
   setDialCode: (dial: string) => void;
   setCode: (code: string) => void;
@@ -72,11 +74,15 @@ type IdentityState = {
   verifyCode: () => Promise<void>;
   submitProfile: () => void;
   submitPasscode: () => Promise<void>;
+  startPasscodeReset: () => Promise<void>;
+  submitPasscodeReset: () => Promise<void>;
+  cancelPasscodeReset: () => void;
   finishWelcome: () => void;
   hydrateFromStorage: () => Promise<void>;
   refillOpksIfLow: () => Promise<void>;
   goBack: () => void;
   reset: () => void;
+  sessionExpired: () => void;
 };
 
 function normalizedPhoneDigits(phone: string) {
@@ -118,7 +124,10 @@ type VerifyOtpRes = {
   phone: string;
   inbox_id: string;
   is_new: boolean;
+  has_passcode: boolean;
 };
+
+type VerifyPasscodeRes = { ok: boolean };
 
 export const useIdentityStore = create<IdentityState>((set, get) => ({
   step: 'phone',
@@ -137,11 +146,11 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
   firstName: '',
   lastName: '',
   passcode: '',
-  passcodeExists: false,
   hydrateFromStorage: async () => {
     if (get().hydrated) return;
     try {
-      const [id, sess] = await Promise.all([loadIdentity(), loadSession()]);
+      const sess = await loadSession();
+      const id = sess ? await loadIdentity(sess.userId) : null;
       if (id && sess) {
         set({
           identity: id,
@@ -203,26 +212,36 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
         otp: code,
       });
 
-      const identity = newIdentity();
+      // Reuse this account's existing keys on re-login (same device); only mint
+      // and publish fresh ones for a first-ever login here. Re-publishing on
+      // every login is wrong now: PUT /auth/keys purges all OPKs server-side
+      // (SudoProto §7.1), so a reused-identity login must NOT re-PUT — it would
+      // wipe the account's prekeys. The server already holds this identity's
+      // bundle + OPKs from registration; refillOpksIfLow tops them up.
+      let identity = await loadIdentity(res.user_id);
+      const isNewIdentity = !identity;
+      if (!identity) identity = newIdentity();
       const pub = publicBundleOf(identity);
-      const bundleBytes = serializeBundle(pub);
 
-      try {
-        await apiBinaryRequest('PUT', '/auth/keys', bundleBytes, res.token);
-      } catch (keyErr) {
-        console.warn('pubkey bundle upload failed', keyErr);
-      }
-
-      try {
-        const opks = mintOpks(identity, OPK_INITIAL_COUNT);
-        await apiBinaryRequest('POST', '/auth/prekeys', serializeOpkUpload(opks), res.token);
-      } catch (opkErr) {
-        console.warn('opk upload failed', opkErr);
+      if (isNewIdentity) {
+        // PUT keys first (purges any stale OPKs), then upload a fresh pool — so
+        // a reinstall's prekeys land cleanly instead of colliding with old ones.
+        try {
+          await apiBinaryRequest('PUT', '/auth/keys', serializeBundle(pub), res.token);
+        } catch (keyErr) {
+          console.warn('pubkey bundle upload failed', keyErr);
+        }
+        try {
+          const opks = mintOpks(identity, OPK_INITIAL_COUNT);
+          await apiBinaryRequest('POST', '/auth/prekeys', serializeOpkUpload(opks), res.token);
+        } catch (opkErr) {
+          console.warn('opk upload failed', opkErr);
+        }
       }
 
       try {
         await Promise.all([
-          saveIdentity(identity),
+          saveIdentity(res.user_id, identity),
           saveSession({
             token: res.token,
             userId: res.user_id,
@@ -244,17 +263,19 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
         fingerprint: identityFingerprint(pub),
       });
 
+      // Mirror the account's server-side passcode state into local settings so
+      // the toggle and gate agree.
+      useAppStore.getState().setSecurity('appPasscode', res.has_passcode);
+
       // Fork on what the server tells us: a brand-new account collects a
-      // profile; an already-registered one either enters its app passcode (when
-      // the device has that setting on) or sails straight to welcome.
+      // profile; an already-registered one with a two-step passcode must enter
+      // it; otherwise straight to welcome.
       if (res.is_new) {
         set({ step: 'profile', error: null });
         return;
       }
-      const passcodeOn = useAppStore.getState().security.appPasscode;
-      if (passcodeOn) {
-        const exists = await hasPasscode();
-        set({ step: 'passcode', passcode: '', passcodeExists: exists, error: null });
+      if (res.has_passcode) {
+        set({ step: 'passcode', passcode: '', error: null });
         return;
       }
       set({ step: 'welcome', error: null });
@@ -283,33 +304,81 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     useAppStore.getState().applySignupProfile({ username, firstName, lastName });
     set({ step: 'welcome', error: null });
   },
-  submitMpin: async () => {
-    const { mpin, mpinExists, pending } = get();
+  submitPasscode: async () => {
+    const { passcode, pending, token, userId } = get();
     if (pending) return;
-    if (!isValidMpin(mpin)) {
-      set({ error: 'Enter a 4-6 digit MPIN.' });
+    if (!isValidPasscode(passcode)) {
+      set({ error: 'Enter a 4-6 digit passcode.' });
+      return;
+    }
+    if (!token || !userId) {
+      set({ error: 'Session expired. Start again.' });
       return;
     }
     set({ pending: true, error: null });
-    if (mpinExists) {
-      const ok = await verifyMpinHash(mpin);
-      if (!ok) {
-        set({ pending: false, mpin: '', error: 'Incorrect MPIN.' });
+    try {
+      const res = await apiJsonPost<VerifyPasscodeRes>(
+        '/auth/passcode/verify',
+        { hash: passcodeHash(userId, passcode) },
+        token,
+      );
+      if (!res.ok) {
+        set({ pending: false, passcode: '', error: 'Incorrect passcode.' });
         return;
       }
-    } else {
-      // First sign-in on this device with the setting on — set the MPIN now.
-      await saveMpin(mpin);
+      set({ pending: false, passcode: '', step: 'welcome', error: null });
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : 'Could not verify. Check connection.';
+      set({ pending: false, error: msg });
     }
-    set({ pending: false, mpin: '', step: 'welcome', error: null });
   },
+  startPasscodeReset: async () => {
+    // We're past sign-in OTP (which was consumed), so send a fresh one to prove
+    // ownership of the number before clearing the passcode. phone is already the
+    // full normalized number from verify-otp.
+    const { phone, pending } = get();
+    if (pending) return;
+    set({ pending: true, error: null });
+    try {
+      await apiJsonPost<{ sent: boolean }>('/auth/request-otp', { phone });
+      set({ pending: false, step: 'passcodeReset', code: '' });
+    } catch (e) {
+      const msg =
+        e instanceof ApiError ? e.message : 'Could not send code. Check connection.';
+      set({ pending: false, error: msg });
+    }
+  },
+  submitPasscodeReset: async () => {
+    const { phone, code, pending } = get();
+    if (pending) return;
+    if (!isValidCode(code)) {
+      set({ error: 'Enter the 6-digit code.' });
+      return;
+    }
+    set({ pending: true, error: null });
+    try {
+      await apiJsonPost<unknown>('/auth/passcode/reset', { phone, otp: code });
+      // Passcode cleared on the account — mirror locally and continue signed in.
+      useAppStore.getState().setSecurity('appPasscode', false);
+      set({ pending: false, code: '', passcode: '', step: 'welcome', error: null });
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? e.status === 401
+            ? 'Invalid or expired code.'
+            : e.message
+          : 'Reset failed. Check connection.';
+      set({ pending: false, error: msg });
+    }
+  },
+  cancelPasscodeReset: () => set({ step: 'passcode', code: '', error: null, pending: false }),
   finishWelcome: () => {
     set({ error: null });
     useBootStore.getState().succeed();
   },
   refillOpksIfLow: async () => {
-    const { token, identity } = get();
-    if (!token || !identity) return;
+    const { token, identity, userId } = get();
+    if (!token || !identity || !userId) return;
     try {
       const countBytes = await apiBinaryRequest(
         'GET',
@@ -332,7 +401,7 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
         serializeOpkUpload(fresh),
         token,
       );
-      await saveIdentity(identity);
+      await saveIdentity(userId, identity);
     } catch (e) {
       console.warn('opk refill failed', e);
     }
@@ -341,16 +410,21 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     set({
       step: 'phone',
       code: '',
-      mpin: '',
-      mpinExists: false,
+      passcode: '',
       error: null,
       pending: false,
     }),
   reset: () => {
-    void clearIdentity();
+    // Sign-out clears the active session (back to auth) but KEEPS this account's
+    // identity keys + chats in their per-account slots, so signing back in on
+    // this device restores them and stays decryptable (cloud-sync feel). A
+    // different account simply loads its own slots.
     void clearSession();
-    void clearChats();
-    void clearMpin();
+    // Different account next: wipe the device-local profile/settings mirror so
+    // one account's name/passcode-toggle doesn't bleed into another, and clear
+    // in-memory chats immediately so the next account never sees them.
+    void useAppStore.getState().resetProfile();
+    useChatStore.getState().clearLocal();
     set({
       step: 'phone',
       phone: '',
@@ -366,8 +440,27 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
       username: '',
       firstName: '',
       lastName: '',
-      mpin: '',
-      mpinExists: false,
+      passcode: '',
+    });
+  },
+  sessionExpired: () => {
+    // Token expired/rejected — NOT a user-initiated sign-out. Drop only the
+    // session (return to OTP) and KEEP the profile, chats, and per-account
+    // identity, so re-verifying the same number restores everything. Phone is
+    // kept so re-auth is one tap. inboxId→null lets the App effect clear the
+    // in-memory chats until re-login reloads them.
+    void clearSession();
+    set({
+      step: 'phone',
+      code: '',
+      passcode: '',
+      pending: false,
+      error: null,
+      token: null,
+      userId: null,
+      inboxId: null,
+      identity: null,
+      fingerprint: null,
     });
   },
 }));

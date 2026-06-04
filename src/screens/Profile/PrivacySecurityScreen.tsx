@@ -1,7 +1,10 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Animated,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,11 +17,14 @@ import { Iconify } from 'react-native-iconify';
 import { StatusBar } from 'expo-status-bar';
 import {
   useAppStore,
+  useIdentityStore,
   type Audience,
   type PrivacyPersona,
   type PrivacySettings,
   type SecuritySettings,
 } from '../../store';
+import { apiJsonPut } from '../../services/api/client';
+import { passcodeHash } from '../../services/crypto/persist';
 import { useTheme, type Theme } from '../../theme';
 import {
   Card,
@@ -29,6 +35,7 @@ import {
   SettingsRow,
   type OptionItem,
 } from '../../components';
+import { PinBoxes } from '../../components/PinBoxes';
 import { useHardwareBack, useSlideIn } from '../../hooks';
 
 const CONTENT_MAX_WIDTH = 560;
@@ -91,9 +98,12 @@ export function PrivacySecurityScreen() {
   const setPrivacy = useAppStore((s) => s.setPrivacy);
   const setSecurity = useAppStore((s) => s.setSecurity);
   const applyPersona = useAppStore((s) => s.applyPrivacyPersona);
+  const token = useIdentityStore((s) => s.token);
+  const userId = useIdentityStore((s) => s.userId);
 
   const [picker, setPicker] = useState<{ key: keyof PrivacySettings; label: string } | null>(null);
   const [personaOpen, setPersonaOpen] = useState(false);
+  const [passcodeOpen, setPasscodeOpen] = useState(false);
 
   const slide = useSlideIn();
   const onBack = useCallback(() => slide.close(close), [slide, close]);
@@ -107,9 +117,13 @@ export function PrivacySecurityScreen() {
       setPersonaOpen(false);
       return true;
     }
+    if (passcodeOpen) {
+      setPasscodeOpen(false);
+      return true;
+    }
     onBack();
     return true;
-  }, [picker, personaOpen, onBack]));
+  }, [picker, personaOpen, passcodeOpen, onBack]));
 
   const strength = strengthOf(security);
   const stub = (what: string) =>
@@ -287,11 +301,19 @@ export function PrivacySecurityScreen() {
               theme={theme}
               icon="lucide:lock"
               label="App passcode"
-              caption="Lock the app behind a 4-6 digit code."
+              caption="Require a 4-6 digit passcode after OTP when signing in."
               value={security.appPasscode}
               onChange={(v) => {
-                if (v) stub('App passcode');
-                setSecurity('appPasscode', v);
+                if (v) {
+                  // Don't enable until a code is actually set in the sheet.
+                  setPasscodeOpen(true);
+                } else {
+                  setSecurity('appPasscode', false);
+                  // Clear it on the account (server), not just locally.
+                  if (token) {
+                    void apiJsonPut('/auth/passcode', { hash: null }, token).catch(() => {});
+                  }
+                }
               }}
             />
             <ToggleRow
@@ -339,7 +361,7 @@ export function PrivacySecurityScreen() {
               },
             ]}
           >
-            Toggles persist locally; flows like 2FA setup, passcode entry, blocked user management, and device list need dedicated screens + server protocol support.
+            Toggles persist locally; flows like 2FA setup, blocked user management, and device list need dedicated screens + server protocol support.
           </Text>
         </View>
       </ScrollView>
@@ -376,11 +398,174 @@ export function PrivacySecurityScreen() {
         onDismiss={() => setPersonaOpen(false)}
       />
 
+      <SetPasscodeSheet
+        visible={passcodeOpen}
+        theme={theme}
+        onCancel={() => setPasscodeOpen(false)}
+        onDone={async (pin) => {
+          if (!token || !userId) throw new Error('not signed in');
+          // Store the per-account salted hash on the server (two-step PIN).
+          await apiJsonPut('/auth/passcode', { hash: passcodeHash(userId, pin) }, token);
+          setSecurity('appPasscode', true);
+          setPasscodeOpen(false);
+          Alert.alert('App passcode', 'Passcode set successfully.');
+        }}
+      />
+
       <StatusBar style={theme.scheme === 'dark' ? 'light' : 'dark'} />
     </Animated.View>
   );
 }
 
+
+// Create-a-passcode sheet shown when the App passcode toggle is switched on.
+// The toggle only flips to "on" once a valid, confirmed code is saved here.
+function SetPasscodeSheet({
+  visible,
+  theme,
+  onCancel,
+  onDone,
+}: {
+  visible: boolean;
+  theme: Theme;
+  onCancel: () => void;
+  onDone: (pin: string) => void | Promise<void>;
+}) {
+  const [pin, setPin] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Start fresh every time the sheet opens.
+  useEffect(() => {
+    if (visible) {
+      setPin('');
+      setConfirm('');
+      setError(null);
+      setBusy(false);
+    }
+  }, [visible]);
+
+  const submit = async () => {
+    if (busy) return;
+    if (!/^\d{4,6}$/.test(pin)) {
+      setError('Passcode must be 4-6 digits.');
+      return;
+    }
+    if (pin !== confirm) {
+      setError('Passcodes do not match.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await onDone(pin);
+    } catch {
+      setBusy(false);
+      setError('Could not set passcode. Check your connection.');
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={passStyles.backdrop}
+      >
+        <View style={[passStyles.card, { backgroundColor: theme.colors.surface }]}>
+          <Text style={[theme.typography.title, { color: theme.colors.text }]}>
+            Set app passcode
+          </Text>
+          <Text
+            style={[
+              theme.typography.caption,
+              { color: theme.colors.textMuted, marginTop: theme.spacing.sm },
+            ]}
+          >
+            A 4-6 digit code, asked after OTP when signing in on this device.
+          </Text>
+
+          <PinBoxes
+            value={pin}
+            onChangeText={(t) => {
+              setPin(t);
+              setError(null);
+            }}
+            autoFocus
+            editable={!busy}
+            error={!!error}
+            style={{ marginTop: theme.spacing.lg }}
+          />
+          <Text
+            style={[
+              theme.typography.caption,
+              {
+                color: theme.colors.textMuted,
+                textAlign: 'center',
+                marginTop: theme.spacing.md,
+              },
+            ]}
+          >
+            Confirm
+          </Text>
+          <PinBoxes
+            value={confirm}
+            onChangeText={(t) => {
+              setConfirm(t);
+              setError(null);
+            }}
+            editable={!busy}
+            error={!!error}
+            onSubmit={submit}
+            style={{ marginTop: theme.spacing.sm }}
+          />
+
+          {error ? (
+            <Text
+              style={[
+                theme.typography.caption,
+                { color: DANGER, marginTop: theme.spacing.sm },
+              ]}
+            >
+              {error}
+            </Text>
+          ) : null}
+
+          <View style={passStyles.actions}>
+            <Pressable
+              onPress={onCancel}
+              disabled={busy}
+              style={({ pressed }) => [
+                passStyles.btn,
+                { paddingHorizontal: theme.spacing.lg, opacity: pressed ? 0.6 : 1 },
+              ]}
+            >
+              <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+                Cancel
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={submit}
+              disabled={busy}
+              style={({ pressed }) => [
+                passStyles.btn,
+                {
+                  paddingHorizontal: theme.spacing.lg,
+                  borderRadius: theme.radii.md,
+                  backgroundColor: theme.colors.primary,
+                  opacity: busy || pressed ? 0.7 : 1,
+                },
+              ]}
+            >
+              <Text style={[theme.typography.body, { color: theme.colors.onPrimary }]}>
+                Set passcode
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
 
 function AudienceRow({
   theme,
@@ -527,4 +712,21 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
   },
+});
+
+const passStyles = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  card: { padding: 20, borderRadius: 16 },
+  actions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    marginTop: 20,
+  },
+  btn: { paddingVertical: 10, marginLeft: 8 },
 });

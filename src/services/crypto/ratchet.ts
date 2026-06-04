@@ -193,10 +193,17 @@ export function bootstrapAsInitiator(
   sender: IdentitySecretBundle,
   peerOpk: PeerOpk | null,
 ): InitiatorBootstrap {
-  const sealed = sealBootstrap(plaintext, peer, sender, peerOpk);
+  // Generate our ratchet key up front and embed its public key in the sealed
+  // body so the responder can set its receiving DH (and a sending chain to
+  // reply) immediately — before we've sent any ratchet-framed message.
+  const dhSendKp = x25519KeyGen();
+  const sealed = sealBootstrap(concat(dhSendKp.pub, plaintext), peer, sender, peerOpk);
   const state: RatchetState = {
     rootKey: sealed.rootKey,
-    dhSendKp: x25519KeyGen(),
+    dhSendKp,
+    // Our first sending chain is DH(our ratchet key, the recipient's identity
+    // X25519); the responder mirrors this with its identity key as its starting
+    // ratchet key.
     dhRecvPub: new Uint8Array(peer.x25519Pub),
     cks: null,
     ckr: null,
@@ -218,6 +225,9 @@ export type ResponderBootstrap = {
   state: RatchetState;
   plaintext: Uint8Array;
   senderX25519Pub: Uint8Array;
+  senderEd25519Pub: Uint8Array;
+  senderSpkPub: Uint8Array;
+  senderSpkSig: Uint8Array;
 };
 
 export function bootstrapAsResponder(
@@ -226,10 +236,22 @@ export function bootstrapAsResponder(
 ): ResponderBootstrap | null {
   const opened = openBootstrap(frame, recipient, (id) => consumeOpkSecret(recipient, id));
   if (!opened) return null;
+  // The sealed body is [initiator ratchet pub (32) || real plaintext].
+  if (opened.plaintext.length < X25519_KEY_BYTES) return null;
+  const initiatorRatchetPub = opened.plaintext.subarray(0, X25519_KEY_BYTES);
+  const realPlaintext = new Uint8Array(opened.plaintext.subarray(X25519_KEY_BYTES));
+
+  // Symmetric Double-Ratchet init. Our starting ratchet key is our identity
+  // X25519 — the same key the initiator used as its DH target — so the receiving
+  // chain we derive here equals the initiator's first sending chain. Then we
+  // ratchet forward to a fresh sending chain for our own replies.
   const state: RatchetState = {
     rootKey: opened.rootKey,
-    dhSendKp: x25519KeyGen(),
-    dhRecvPub: new Uint8Array(opened.senderX25519Pub),
+    dhSendKp: {
+      pub: new Uint8Array(recipient.x25519.pub),
+      sec: new Uint8Array(recipient.x25519.sec),
+    },
+    dhRecvPub: new Uint8Array(initiatorRatchetPub),
     cks: null,
     ckr: null,
     ns: 0,
@@ -237,16 +259,30 @@ export function bootstrapAsResponder(
     pn: 0,
     skipped: new Map(),
   };
-  const dh = x25519Dh(recipient.x25519.sec, state.dhRecvPub);
-  const oldRk = state.rootKey;
-  const r = kdfRK(state.rootKey, dh);
-  zeroize(dh, oldRk);
-  state.rootKey = r.rk;
-  state.ckr = r.ck;
+  // Receiving chain: DH(our identity, initiator ratchet pub) == initiator's
+  // DH(its ratchet key, our identity).
+  const dh1 = x25519Dh(state.dhSendKp.sec, state.dhRecvPub);
+  const oldRk1 = state.rootKey;
+  const r1 = kdfRK(state.rootKey, dh1);
+  zeroize(dh1, oldRk1);
+  state.rootKey = r1.rk;
+  state.ckr = r1.ck;
+  // Sending chain: fresh ratchet key DH'd against the initiator's ratchet pub.
+  const oldSec = state.dhSendKp.sec;
+  state.dhSendKp = x25519KeyGen();
+  const dh2 = x25519Dh(state.dhSendKp.sec, state.dhRecvPub);
+  const oldRk2 = state.rootKey;
+  const r2 = kdfRK(state.rootKey, dh2);
+  zeroize(dh2, oldRk2, oldSec);
+  state.rootKey = r2.rk;
+  state.cks = r2.ck;
   return {
     state,
-    plaintext: opened.plaintext,
+    plaintext: realPlaintext,
     senderX25519Pub: opened.senderX25519Pub,
+    senderEd25519Pub: opened.senderEd25519Pub,
+    senderSpkPub: opened.senderSpkPub,
+    senderSpkSig: opened.senderSpkSig,
   };
 }
 

@@ -8,7 +8,6 @@ const KEY_IDENTITY = 'schat.identity.v1';
 const KEY_SESSION = 'schat.session.v1';
 const KEY_CHATS = 'schat.chats.v1';
 const KEY_PROFILE = 'schat.profile.v1';
-const KEY_PASSCODE = 'schat.passcode.v1';
 
 export type PersistedProfile = {
   themeOverride: 'system' | 'light' | 'dark';
@@ -100,9 +99,9 @@ export type PrivacySettings = {
 export type SecuritySettings = {
   twoFactor: boolean;
   autoDeleteDays: number;
-  // When on, an already-registered account must enter its passcode after OTP to
-  // finish signing in (see useIdentityStore). The digits live in their own
-  // SecureStore slot (KEY_PASSCODE), never in the profile blob.
+  // Local mirror of whether the signed-in account has a two-step passcode set
+  // on the server. Source of truth is the backend (has_passcode); this just
+  // drives the settings toggle and the post-OTP gate. See useIdentityStore.
   appPasscode: boolean;
   passkeys: boolean;
   blockedCount: number;
@@ -338,41 +337,14 @@ export async function clearProfile(): Promise<void> {
   }
 }
 
-// ── App passcode (local sign-in PIN) ─────────────────────────────────────────
-// A 4-6 digit code that gates the sign-in of an already-registered account on
-// this device. We only ever persist a keyed hash, never the digits, and compare
-// hash-to-hash so the raw code never has to be read back.
-function hashPasscode(pin: string): string {
-  return hex(hmacSha512(utf8Encode('schat.passcode.v1'), utf8Encode(pin)));
-}
-
-export async function savePasscode(pin: string): Promise<void> {
-  await SecureStore.setItemAsync(KEY_PASSCODE, hashPasscode(pin));
-}
-
-export async function hasPasscode(): Promise<boolean> {
-  try {
-    return (await SecureStore.getItemAsync(KEY_PASSCODE)) != null;
-  } catch {
-    return false;
-  }
-}
-
-export async function verifyPasscode(pin: string): Promise<boolean> {
-  try {
-    const stored = await SecureStore.getItemAsync(KEY_PASSCODE);
-    return stored != null && stored === hashPasscode(pin);
-  } catch {
-    return false;
-  }
-}
-
-export async function clearPasscode(): Promise<void> {
-  try {
-    await SecureStore.deleteItemAsync(KEY_PASSCODE);
-  } catch {
-    // ignore
-  }
+// ── Two-step passcode (per-account, server-side) ─────────────────────────────
+// The passcode belongs to the account (phone number), not the device — like
+// Telegram/WhatsApp's two-step verification. The raw PIN never leaves the
+// client: we send this per-account salted hash to the backend, which stores and
+// compares it. Salting with the userId keeps two accounts that pick the same
+// PIN from producing the same hash.
+export function passcodeHash(userId: string, pin: string): string {
+  return hex(hmacSha512(utf8Encode(`schat.passcode.v1:${userId}`), utf8Encode(pin)));
 }
 
 export type PersistedSession = {
@@ -382,9 +354,17 @@ export type PersistedSession = {
   inboxId: string;
 };
 
-export async function loadIdentity(): Promise<IdentitySecretBundle | null> {
+// Identity (the long-term keys) is stored per account (keyed by userId), and
+// reused across logins on this device — re-signing-in must NOT mint fresh keys,
+// or messages encrypted to the old keys (e.g. an unreceived alice→bob message)
+// become undecryptable. `accountId` is the server user_id.
+function identityKey(accountId: string): string {
+  return `${KEY_IDENTITY}.${accountId}`;
+}
+
+export async function loadIdentity(accountId: string): Promise<IdentitySecretBundle | null> {
   try {
-    const raw = await SecureStore.getItemAsync(KEY_IDENTITY);
+    const raw = await SecureStore.getItemAsync(identityKey(accountId));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     return deserializeIdentity(parsed);
@@ -393,14 +373,14 @@ export async function loadIdentity(): Promise<IdentitySecretBundle | null> {
   }
 }
 
-export async function saveIdentity(id: IdentitySecretBundle): Promise<void> {
+export async function saveIdentity(accountId: string, id: IdentitySecretBundle): Promise<void> {
   const ser = serializeIdentity(id);
-  await SecureStore.setItemAsync(KEY_IDENTITY, JSON.stringify(ser));
+  await SecureStore.setItemAsync(identityKey(accountId), JSON.stringify(ser));
 }
 
-export async function clearIdentity(): Promise<void> {
+export async function clearIdentity(accountId: string): Promise<void> {
   try {
-    await SecureStore.deleteItemAsync(KEY_IDENTITY);
+    await SecureStore.deleteItemAsync(identityKey(accountId));
   } catch {
     // ignore
   }
@@ -500,17 +480,24 @@ export type SerializedChats = {
   conversations: SerializedConversation[];
   messages: Record<
     string,
-    { id: string; author: 'me' | 'them'; text: string; sentAt: number }[]
+    { id: string; author: 'me' | 'them'; from?: string; text: string; sentAt: number }[]
   >;
 };
 
-export async function saveChats(payload: SerializedChats): Promise<void> {
-  await SecureStore.setItemAsync(KEY_CHATS, JSON.stringify(payload));
+// Chats are stored per account (keyed by the account's inbox id), never in one
+// device-global slot — so two accounts signing in on the same device can't see
+// each other's conversations. `accountId` is the signed-in user's inbox_id.
+function chatsKey(accountId: string): string {
+  return `${KEY_CHATS}.${accountId}`;
 }
 
-export async function loadChats(): Promise<SerializedChats | null> {
+export async function saveChats(accountId: string, payload: SerializedChats): Promise<void> {
+  await SecureStore.setItemAsync(chatsKey(accountId), JSON.stringify(payload));
+}
+
+export async function loadChats(accountId: string): Promise<SerializedChats | null> {
   try {
-    const raw = await SecureStore.getItemAsync(KEY_CHATS);
+    const raw = await SecureStore.getItemAsync(chatsKey(accountId));
     if (!raw) return null;
     return JSON.parse(raw) as SerializedChats;
   } catch {
@@ -518,9 +505,9 @@ export async function loadChats(): Promise<SerializedChats | null> {
   }
 }
 
-export async function clearChats(): Promise<void> {
+export async function clearChats(accountId: string): Promise<void> {
   try {
-    await SecureStore.deleteItemAsync(KEY_CHATS);
+    await SecureStore.deleteItemAsync(chatsKey(accountId));
   } catch {
     // ignore
   }

@@ -18,6 +18,20 @@ export class ApiError extends Error {
 
 type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
+// Called when an authenticated request (one that sent a token) is rejected with
+// 401 — i.e. the login session is expired/invalid. The app registers a handler
+// that signs the user out and returns to the auth screen.
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  onUnauthorized = fn;
+}
+
+// Only treat a 401 as "session expired" when we actually presented a token;
+// unauthenticated 401s (e.g. wrong OTP on verify) must NOT sign anyone out.
+function handleAuthFailure(status: number, hadToken: boolean): void {
+  if (status === 401 && hadToken) onUnauthorized?.();
+}
+
 async function jsonRequest<T>(
   method: Method,
   path: string,
@@ -38,6 +52,7 @@ async function jsonRequest<T>(
   const data = text ? safeJson(text) : null;
 
   if (!res.ok) {
+    handleAuthFailure(res.status, !!token);
     const message =
       (data && typeof data === 'object' && 'error' in data && typeof (data as any).error === 'string'
         ? (data as any).error
@@ -53,6 +68,10 @@ export function apiJsonPost<T>(path: string, body: unknown, token?: string): Pro
 
 export function apiJsonGet<T>(path: string, token?: string): Promise<T> {
   return jsonRequest<T>('GET', path, undefined, token);
+}
+
+export function apiJsonPut<T>(path: string, body: unknown, token?: string): Promise<T> {
+  return jsonRequest<T>('PUT', path, body, token);
 }
 
 export async function apiBinaryRequest(
@@ -83,6 +102,7 @@ export async function apiBinaryRequest(
   });
 
   if (!res.ok) {
+    handleAuthFailure(res.status, !!token);
     const text = await res.text();
     let message = `Request failed (${res.status})`;
     try {
