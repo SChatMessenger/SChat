@@ -17,15 +17,12 @@ import {
   zeroize,
   type X25519Keypair,
 } from './primitives';
-import { consumeOpkSecret } from './prekeys';
-import {
-  FRAME_RATCHET,
-  type IdentityPublicBundle,
-  type IdentitySecretBundle,
-  type PeerOpk,
-  openBootstrap,
-  sealBootstrap,
-} from './session';
+import type { IdentitySecretBundle } from './keys';
+
+// The ongoing double-ratchet frame kind. The live-AKE handshake frames (0x03
+// AKE_INIT / 0x04 AKE_RESP) live in ./ake; keeping this distinct lets the relay
+// and the inbox dispatcher tell a handshake from a message by the first byte.
+export const FRAME_RATCHET = 0x02;
 
 const RK_INFO = utf8Encode('schat/v1 ratchet rk');
 const MK_TAG = new Uint8Array([0x01]);
@@ -95,8 +92,10 @@ function dhRatchetSend(state: RatchetState): void {
   state.nr = 0;
 }
 
-function dhRatchetRecv(state: RatchetState, newDhRecvPub: Uint8Array): void {
-  skipMessageKeys(state, state.pn);
+function dhRatchetRecv(state: RatchetState, newDhRecvPub: Uint8Array): boolean {
+  // Bail before mutating any ratchet state if the previous chain can't be
+  // drained, so a dropped frame leaves the session consistent.
+  if (!skipMessageKeys(state, state.pn)) return false;
   state.pn = state.ns;
   state.ns = 0;
   state.nr = 0;
@@ -118,14 +117,21 @@ function dhRatchetRecv(state: RatchetState, newDhRecvPub: Uint8Array): void {
   zeroize(dh2, oldRk, oldCks, oldCkr, oldSec);
   state.rootKey = r2.rk;
   state.cks = r2.ck;
+  return true;
 }
 
 type SkippedSlot = { mk: Uint8Array; nonce: Uint8Array };
 
-function skipMessageKeys(state: RatchetState, until: number): void {
-  if (!state.ckr) return;
+// Returns false when the gap is unrecoverable (more than MAX_SKIP keys would
+// have to be derived). It must NOT throw: a throw here used to propagate out of
+// openNext into the inbox-drain catch and wedge the ENTIRE inbox — the offending
+// frame was never acked, so every poll re-fetched it and threw again,
+// permanently blocking all later messages. Signal-style behaviour is to drop
+// just this one frame (openNext returns null, the caller continues).
+function skipMessageKeys(state: RatchetState, until: number): boolean {
+  if (!state.ckr) return true;
   if (until - state.nr > MAX_SKIP) {
-    throw new Error('too many skipped messages');
+    return false;
   }
   while (state.nr < until) {
     const r = kdfCK(state.ckr);
@@ -135,6 +141,7 @@ function skipMessageKeys(state: RatchetState, until: number): void {
     state.skipped.set(key, { mk: r.mk, nonce: r.nonce });
     state.nr += 1;
   }
+  return true;
 }
 
 function tryConsumeSkipped(
@@ -182,29 +189,25 @@ function ratchetAad(
   return header;
 }
 
-export type InitiatorBootstrap = {
-  state: RatchetState;
-  frame: Uint8Array;
-};
+// --- Double Ratchet seeding from a live-AKE root key (SudoProto §0.1.7 → §9) ---
+//
+// After the live AKE both peers hold the same RK plus the two handshake
+// ephemerals (the initiator has ek_A and the responder's ek_B pub; the responder
+// has ek_B and ek_A pub). We seed the Double Ratchet using those ephemerals as
+// the initial ratchet keys — the SAME symmetric structure the old async bootstrap
+// used, with ek_A playing the initiator's ratchet key and ek_B the shared anchor.
+// So the initiator's first sending chain equals the responder's receiving chain,
+// and replies trigger a normal DH ratchet step.
 
-export function bootstrapAsInitiator(
-  plaintext: Uint8Array,
-  peer: IdentityPublicBundle,
-  sender: IdentitySecretBundle,
-  peerOpk: PeerOpk | null,
-): InitiatorBootstrap {
-  // Generate our ratchet key up front and embed its public key in the sealed
-  // body so the responder can set its receiving DH (and a sending chain to
-  // reply) immediately — before we've sent any ratchet-framed message.
-  const dhSendKp = x25519KeyGen();
-  const sealed = sealBootstrap(concat(dhSendKp.pub, plaintext), peer, sender, peerOpk);
+export function ratchetInitInitiator(
+  rk: Uint8Array,
+  ekA: X25519Keypair,
+  ekBPub: Uint8Array,
+): RatchetState {
   const state: RatchetState = {
-    rootKey: sealed.rootKey,
-    dhSendKp,
-    // Our first sending chain is DH(our ratchet key, the recipient's identity
-    // X25519); the responder mirrors this with its identity key as its starting
-    // ratchet key.
-    dhRecvPub: new Uint8Array(peer.x25519Pub),
+    rootKey: new Uint8Array(rk),
+    dhSendKp: { pub: new Uint8Array(ekA.pub), sec: new Uint8Array(ekA.sec) },
+    dhRecvPub: new Uint8Array(ekBPub),
     cks: null,
     ckr: null,
     ns: 0,
@@ -218,40 +221,18 @@ export function bootstrapAsInitiator(
   zeroize(dh, oldRk);
   state.rootKey = r.rk;
   state.cks = r.ck;
-  return { state, frame: sealed.frame };
+  return state;
 }
 
-export type ResponderBootstrap = {
-  state: RatchetState;
-  plaintext: Uint8Array;
-  senderX25519Pub: Uint8Array;
-  senderEd25519Pub: Uint8Array;
-  senderSpkPub: Uint8Array;
-  senderSpkSig: Uint8Array;
-};
-
-export function bootstrapAsResponder(
-  frame: Uint8Array,
-  recipient: IdentitySecretBundle,
-): ResponderBootstrap | null {
-  const opened = openBootstrap(frame, recipient, (id) => consumeOpkSecret(recipient, id));
-  if (!opened) return null;
-  // The sealed body is [initiator ratchet pub (32) || real plaintext].
-  if (opened.plaintext.length < X25519_KEY_BYTES) return null;
-  const initiatorRatchetPub = opened.plaintext.subarray(0, X25519_KEY_BYTES);
-  const realPlaintext = new Uint8Array(opened.plaintext.subarray(X25519_KEY_BYTES));
-
-  // Symmetric Double-Ratchet init. Our starting ratchet key is our identity
-  // X25519 — the same key the initiator used as its DH target — so the receiving
-  // chain we derive here equals the initiator's first sending chain. Then we
-  // ratchet forward to a fresh sending chain for our own replies.
+export function ratchetInitResponder(
+  rk: Uint8Array,
+  ekB: X25519Keypair,
+  ekAPub: Uint8Array,
+): RatchetState {
   const state: RatchetState = {
-    rootKey: opened.rootKey,
-    dhSendKp: {
-      pub: new Uint8Array(recipient.x25519.pub),
-      sec: new Uint8Array(recipient.x25519.sec),
-    },
-    dhRecvPub: new Uint8Array(initiatorRatchetPub),
+    rootKey: new Uint8Array(rk),
+    dhSendKp: { pub: new Uint8Array(ekB.pub), sec: new Uint8Array(ekB.sec) },
+    dhRecvPub: new Uint8Array(ekAPub),
     cks: null,
     ckr: null,
     ns: 0,
@@ -259,15 +240,14 @@ export function bootstrapAsResponder(
     pn: 0,
     skipped: new Map(),
   };
-  // Receiving chain: DH(our identity, initiator ratchet pub) == initiator's
-  // DH(its ratchet key, our identity).
+  // Receiving chain: DH(ek_B, ek_A) == the initiator's first sending chain.
   const dh1 = x25519Dh(state.dhSendKp.sec, state.dhRecvPub);
   const oldRk1 = state.rootKey;
   const r1 = kdfRK(state.rootKey, dh1);
   zeroize(dh1, oldRk1);
   state.rootKey = r1.rk;
   state.ckr = r1.ck;
-  // Sending chain: fresh ratchet key DH'd against the initiator's ratchet pub.
+  // Sending chain: a fresh ratchet key DH'd against ek_A.
   const oldSec = state.dhSendKp.sec;
   state.dhSendKp = x25519KeyGen();
   const dh2 = x25519Dh(state.dhSendKp.sec, state.dhRecvPub);
@@ -276,14 +256,7 @@ export function bootstrapAsResponder(
   zeroize(dh2, oldRk2, oldSec);
   state.rootKey = r2.rk;
   state.cks = r2.ck;
-  return {
-    state,
-    plaintext: realPlaintext,
-    senderX25519Pub: opened.senderX25519Pub,
-    senderEd25519Pub: opened.senderEd25519Pub,
-    senderSpkPub: opened.senderSpkPub,
-    senderSpkSig: opened.senderSpkSig,
-  };
+  return state;
 }
 
 export function sealNext(
@@ -339,18 +312,23 @@ export function openNext(
     zeroize(slot.mk, slot.nonce);
     if (!padded) return null;
     const pt = unpadPlaintext(padded);
+    // unpadPlaintext returns a VIEW into `padded`; copy it out BEFORE zeroizing.
+    const out = pt ? new Uint8Array(pt) : null;
     zeroize(padded);
-    if (!pt) return null;
-    return { plaintext: new Uint8Array(pt), senderX25519Pub: new Uint8Array(senderIdPub) };
+    if (!out) return null;
+    return { plaintext: out, senderX25519Pub: new Uint8Array(senderIdPub) };
   }
 
   if (!bytesEqual(dhPub, state.dhRecvPub)) {
-    skipMessageKeys(state, pn);
-    dhRatchetRecv(state, dhPub);
+    // An unrecoverable gap (> MAX_SKIP) drops just this frame instead of
+    // throwing and wedging the whole inbox. State is left consistent because
+    // both helpers bail before mutating on the over-skip path.
+    if (!skipMessageKeys(state, pn)) return null;
+    if (!dhRatchetRecv(state, dhPub)) return null;
   }
   if (!state.ckr) return null;
 
-  skipMessageKeys(state, n);
+  if (!skipMessageKeys(state, n)) return null;
 
   const oldCkr = state.ckr;
   const r = kdfCK(oldCkr);
@@ -362,9 +340,11 @@ export function openNext(
   zeroize(r.mk, r.nonce);
   if (!padded) return null;
   const pt = unpadPlaintext(padded);
+  // unpadPlaintext returns a VIEW into `padded`; copy it out BEFORE zeroizing.
+  const out = pt ? new Uint8Array(pt) : null;
   zeroize(padded);
-  if (!pt) return null;
-  return { plaintext: new Uint8Array(pt), senderX25519Pub: new Uint8Array(senderIdPub) };
+  if (!out) return null;
+  return { plaintext: out, senderX25519Pub: new Uint8Array(senderIdPub) };
 }
 
 export function peekVersion(frame: Uint8Array): number {

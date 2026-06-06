@@ -28,6 +28,7 @@ export function NewChatScreen() {
 
   const closeCompose = useChatStore((s) => s.closeCompose);
   const findContact = useChatStore((s) => s.findContact);
+  const findByUsername = useChatStore((s) => s.findByUsername);
   const lookupPending = useChatStore((s) => s.lookupPending);
   const lookupError = useChatStore((s) => s.lookupError);
 
@@ -122,6 +123,33 @@ export function NewChatScreen() {
           >
             {error ?? lookupError}
           </Text>
+        ) : null}
+
+        {query.trim().startsWith('@') && query.trim().length > 1 ? (
+          <Pressable
+            onPress={() => void findByUsername(query.trim())}
+            disabled={lookupPending}
+            style={({ pressed }) => [
+              styles.manualToggle,
+              {
+                marginTop: theme.spacing.md,
+                borderColor: theme.colors.primary,
+                backgroundColor: pressed ? theme.colors.surface : 'transparent',
+                paddingHorizontal: theme.spacing.md,
+                paddingVertical: theme.spacing.sm,
+                borderRadius: theme.radii.md,
+              },
+            ]}
+          >
+            <Text
+              style={[
+                theme.typography.body,
+                { color: theme.colors.primary, fontWeight: '600' },
+              ]}
+            >
+              {lookupPending ? 'Searching…' : `Find ${query.trim().toLowerCase()}`}
+            </Text>
+          </Pressable>
         ) : null}
 
         <Pressable

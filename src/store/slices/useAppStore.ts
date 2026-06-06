@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { triggerProfileSync } from '../../services/profileSyncBridge';
 import {
   CHAT_FONT_DEFAULT,
   CHAT_FONT_MAX,
@@ -92,6 +93,13 @@ type AppState = {
   cycleThemeOverride: () => void;
   setDisplayName: (name: string) => void;
   applySignupProfile: (p: { username: string; firstName: string; lastName: string }) => void;
+  applyCloudProfile: (p: {
+    username?: string;
+    firstName?: string;
+    lastName?: string;
+    displayName?: string;
+    bio?: string;
+  }) => void;
   setAvatarUri: (uri: string | null) => void;
   setDob: (dob: string) => void;
   setRegion: (region: string) => void;
@@ -199,6 +207,9 @@ function snapshot(s: PersistedFields) {
 
 function persist(s: PersistedFields) {
   void saveProfile(snapshot(s)).catch((e) => console.warn('profile persist failed', e));
+  // Re-encrypt + upload the profile to the cloud (debounced in the identity
+  // store). No-op until signed in. SudoProto 3.0 §0.1.4.
+  triggerProfileSync();
 }
 
 function privacyPreset(persona: PrivacyPersona): Partial<PrivacySettings> {
@@ -341,6 +352,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       lastName: last,
       displayName: [first, last].filter(Boolean).join(' ').slice(0, 40),
     });
+    persist(get());
+  },
+  // Merge a profile decrypted from the cloud (SudoProto 3.0 §0.1.4) — only fields
+  // the blob actually carries, so a restore doesn't clobber local edits with blanks.
+  applyCloudProfile: (p) => {
+    const next: Partial<AppState> = {};
+    if (p.username) next.username = p.username.slice(0, 32);
+    if (typeof p.firstName === 'string') next.firstName = p.firstName.slice(0, 40);
+    if (typeof p.lastName === 'string') next.lastName = p.lastName.slice(0, 40);
+    if (p.displayName) next.displayName = p.displayName.slice(0, 40);
+    if (typeof p.bio === 'string') next.bio = p.bio.slice(0, 280);
+    set(next);
     persist(get());
   },
   setAvatarUri: (avatarUri) => {

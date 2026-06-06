@@ -37,6 +37,8 @@ export function ProfileScreen() {
   const phone = useIdentityStore((s) => s.phone);
   const switchTheme = useThemeSwitch();
   const displayName = useAppStore((s) => s.displayName);
+  const username = useAppStore((s) => s.username);
+  const bio = useAppStore((s) => s.bio);
   const resetBoot = useBootStore((s) => s.reset);
   const resetIdentity = useIdentityStore((s) => s.reset);
   const openAccount = useAppStore((s) => s.openAccount);
@@ -104,6 +106,15 @@ export function ProfileScreen() {
             >
               {displayName.trim() || 'Your name'}
             </Text>
+            {username ? (
+              <Text
+                numberOfLines={1}
+                maxFontSizeMultiplier={1.3}
+                style={[theme.typography.body, { color: theme.colors.primary, marginTop: 2 }]}
+              >
+                @{username}
+              </Text>
+            ) : null}
             <Text
               maxFontSizeMultiplier={1.3}
               style={[styles.mono, { color: theme.colors.textMuted, marginTop: 2 }]}
@@ -112,6 +123,18 @@ export function ProfileScreen() {
             </Text>
           </Pressable>
         </View>
+
+        {bio.trim() ? (
+          <Text
+            maxFontSizeMultiplier={1.4}
+            style={[
+              theme.typography.body,
+              { color: theme.colors.textMuted, marginTop: theme.spacing.md },
+            ]}
+          >
+            {bio.trim()}
+          </Text>
+        ) : null}
 
         <Section title="Settings" theme={theme}>
           {MENU_ITEMS.map((item, i) => (

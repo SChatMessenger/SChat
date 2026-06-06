@@ -2,7 +2,8 @@ import * as SecureStore from 'expo-secure-store';
 import { deserializeIdentity, serializeIdentity } from './keys';
 import { hex, hmacSha512, unhex, utf8Encode } from './primitives';
 import type { RatchetState } from './ratchet';
-import type { IdentitySecretBundle } from './session';
+import type { IdentitySecretBundle } from './keys';
+import type { SerializedAkePending } from './ake';
 
 const KEY_IDENTITY = 'schat.identity.v1';
 const KEY_SESSION = 'schat.session.v1';
@@ -348,10 +349,17 @@ export function passcodeHash(userId: string, pin: string): string {
 }
 
 export type PersistedSession = {
-  token: string;
   userId: string;
   phone: string;
   inboxId: string;
+  // SudoProto 3.0 SISC (§0.1.2): the account's long-term P-256 auth keypair (hex)
+  // and its revocation epoch. The session certificate is re-minted from these in
+  // memory on each boot; there is no bearer token to persist.
+  authSecHex: string;
+  authPubHex: string;
+  revEpoch: number;
+  // Legacy pre-3.0 bearer token; ignored, kept optional for old persisted blobs.
+  token?: string;
 };
 
 // Identity (the long-term keys) is stored per account (keyed by userId), and
@@ -466,13 +474,15 @@ export type SerializedConversation = {
   lastMessage: string;
   lastMessageAt: number;
   unreadCount: number;
+  // 64-byte peer core (idX ‖ idEd) hex — see crypto/keys serializePeer.
   peerBundleHex: string | null;
   peerFingerprint: string | null;
   safetyNumber: string | null;
   verified: boolean;
-  peerOpkId?: number;
-  peerOpkPubHex?: string;
-  peerOpkSigHex?: string;
+  // Live-AKE state: a handshake in flight (so a restart can still finish it) and
+  // any plaintext queued while it completes (SudoProto §0.1.7 first-contact RT).
+  pendingAke?: SerializedAkePending | null;
+  outbox?: string[];
   ratchet: SerializedRatchet | null;
 };
 

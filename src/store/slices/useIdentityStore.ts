@@ -4,19 +4,23 @@ import {
   apiBinaryRequest,
   apiJsonPost,
 } from '../../services/api/client';
+import { clearSiscSigner, configureSiscSigner } from '../../services/api/sisc';
+import {
+  getProfileBlob,
+  putProfileBlob,
+  usernameCheck,
+  usernameClaim,
+} from '../../services/api/profile';
+import { hex, unhex } from '../../services/crypto/primitives';
+import { decryptProfile, encryptProfile } from '../../services/crypto/profile';
+import { p256KeyGen, signRegistration } from '../../services/crypto/sisc';
+import { setProfileSyncTrigger } from '../../services/profileSyncBridge';
 import {
   identityFingerprint,
   newIdentity,
   publicBundleOf,
   serializeBundle,
 } from '../../services/crypto/keys';
-import {
-  OPK_INITIAL_COUNT,
-  OPK_REFILL_BATCH,
-  OPK_REFILL_THRESHOLD,
-  mintOpks,
-  serializeOpkUpload,
-} from '../../services/crypto/prekeys';
 import {
   clearSession,
   loadIdentity,
@@ -25,10 +29,9 @@ import {
   saveIdentity,
   saveSession,
 } from '../../services/crypto/persist';
-import type { IdentitySecretBundle } from '../../services/crypto/session';
+import type { IdentitySecretBundle } from '../../services/crypto/keys';
 import { useAppStore } from './useAppStore';
 import { useBootStore } from './useBootStore';
-import { useChatStore } from './useChatStore';
 
 // Linear sign-in flow (passcode is the account's server-side two-step PIN):
 //   phone → code → (new account)               profile  → welcome → app
@@ -43,6 +46,8 @@ type IdentityStep =
   | 'passcode'
   | 'passcodeReset'
   | 'welcome';
+
+type UsernameStatus = 'idle' | 'checking' | 'invalid' | 'available' | 'taken';
 
 type IdentityState = {
   step: IdentityStep;
@@ -63,6 +68,7 @@ type IdentityState = {
   lastName: string;
   // Passcode entry buffer, used on the 'passcode' step (verify against server).
   passcode: string;
+  usernameStatus: UsernameStatus;
   setPhone: (phone: string) => void;
   setDialCode: (dial: string) => void;
   setCode: (code: string) => void;
@@ -72,14 +78,14 @@ type IdentityState = {
   setPasscode: (passcode: string) => void;
   sendCode: () => Promise<void>;
   verifyCode: () => Promise<void>;
-  submitProfile: () => void;
+  submitProfile: () => Promise<void>;
+  checkUsername: (u: string) => Promise<void>;
   submitPasscode: () => Promise<void>;
   startPasscodeReset: () => Promise<void>;
   submitPasscodeReset: () => Promise<void>;
   cancelPasscodeReset: () => void;
   finishWelcome: () => void;
   hydrateFromStorage: () => Promise<void>;
-  refillOpksIfLow: () => Promise<void>;
   goBack: () => void;
   reset: () => void;
   sessionExpired: () => void;
@@ -99,7 +105,37 @@ function isValidCode(code: string) {
 }
 
 function isValidUsername(username: string) {
-  return /^[a-z0-9_]{3,32}$/.test(username.trim().toLowerCase());
+  // a-z 0-9 . - _ + only, 5-32 chars (matches backend utils::phone::normalize_username).
+  return /^[a-z0-9._+-]{5,32}$/.test(username.trim().toLowerCase());
+}
+
+// SudoProto 3.0 §0.1.4 — sync the owner-encrypted profile to/from the cloud. The
+// relay stores only ciphertext; only this device's identity can decrypt it.
+async function pushProfile(identity: IdentitySecretBundle): Promise<void> {
+  try {
+    const a = useAppStore.getState();
+    const blob = encryptProfile(identity, {
+      username: a.username,
+      firstName: a.firstName,
+      lastName: a.lastName,
+      displayName: a.displayName,
+      bio: a.bio,
+    });
+    await putProfileBlob(blob);
+  } catch (e) {
+    console.warn('profile upload failed', e);
+  }
+}
+
+async function pullProfile(identity: IdentitySecretBundle): Promise<void> {
+  try {
+    const blob = await getProfileBlob();
+    if (!blob || blob.length === 0) return;
+    const p = decryptProfile(identity, blob);
+    if (p) useAppStore.getState().applyCloudProfile(p);
+  } catch (e) {
+    console.warn('profile download failed', e);
+  }
 }
 
 function isValidPasscode(pin: string) {
@@ -119,12 +155,12 @@ export function shortFingerprint(seed: string): string {
 }
 
 type VerifyOtpRes = {
-  token: string;
   user_id: string;
   phone: string;
   inbox_id: string;
   is_new: boolean;
   has_passcode: boolean;
+  rev_epoch: number;
 };
 
 type VerifyPasscodeRes = { ok: boolean };
@@ -146,21 +182,26 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
   firstName: '',
   lastName: '',
   passcode: '',
+  usernameStatus: 'idle',
   hydrateFromStorage: async () => {
     if (get().hydrated) return;
     try {
       const sess = await loadSession();
       const id = sess ? await loadIdentity(sess.userId) : null;
-      if (id && sess) {
+      if (id && sess && sess.authSecHex) {
+        // Re-mint the in-memory SISC session certificate from the persisted
+        // long-term auth key. `token` is now just a non-null "signed-in" marker.
+        configureSiscSigner(sess.userId, unhex(sess.authSecHex), sess.revEpoch ?? 0);
         set({
           identity: id,
           fingerprint: identityFingerprint(publicBundleOf(id)),
-          token: sess.token,
+          token: sess.userId,
           userId: sess.userId,
           phone: sess.phone,
           inboxId: sess.inboxId,
           hydrated: true,
         });
+        void pullProfile(id);
         useBootStore.getState().succeed();
       } else {
         set({ hydrated: true });
@@ -174,7 +215,11 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
   setDialCode: (dialCode) => set({ dialCode, error: null }),
   setCode: (code) => set({ code: code.replace(/\D/g, '').slice(0, 6), error: null }),
   setUsername: (username) =>
-    set({ username: username.replace(/[^a-zA-Z0-9_]/g, '').toLowerCase().slice(0, 32), error: null }),
+    set({
+      username: username.toLowerCase().replace(/[^a-z0-9._+-]/g, '').slice(0, 32),
+      usernameStatus: 'idle',
+      error: null,
+    }),
   setFirstName: (firstName) => set({ firstName: firstName.slice(0, 40), error: null }),
   setLastName: (lastName) => set({ lastName: lastName.slice(0, 40), error: null }),
   setPasscode: (passcode) =>
@@ -207,46 +252,45 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     }
     set({ pending: true, error: null });
     try {
+      // SudoProto 3.0: generate this login's P-256 auth key and prove possession
+      // of it by signing the OTP challenge. The server binds the public key to
+      // the account and returns NO token — we self-issue session certs from here.
+      const phoneApi = formatPhoneForApi(dialCode, phone);
+      const authKp = p256KeyGen();
+      const proof = signRegistration(authKp.sec, authKp.pub, phoneApi, code);
       const res = await apiJsonPost<VerifyOtpRes>('/auth/verify-otp', {
-        phone: formatPhoneForApi(dialCode, phone),
+        phone: phoneApi,
         otp: code,
+        auth_pubkey: hex(authKp.pub),
+        proof: hex(proof),
       });
 
+      // Configure the request signer BEFORE any authenticated call below.
+      configureSiscSigner(res.user_id, authKp.sec, res.rev_epoch);
+
       // Reuse this account's existing keys on re-login (same device); only mint
-      // and publish fresh ones for a first-ever login here. Re-publishing on
-      // every login is wrong now: PUT /auth/keys purges all OPKs server-side
-      // (SudoProto §7.1), so a reused-identity login must NOT re-PUT — it would
-      // wipe the account's prekeys. The server already holds this identity's
-      // bundle + OPKs from registration; refillOpksIfLow tops them up.
+      // fresh ones for a first-ever login here. Under 3.0 the published material
+      // is just the 128-byte identity bundle (no prekey pool), so re-publishing
+      // is harmless — but we still skip it for a reused identity since nothing
+      // changed.
       let identity = await loadIdentity(res.user_id);
       const isNewIdentity = !identity;
       if (!identity) identity = newIdentity();
       const pub = publicBundleOf(identity);
 
-      if (isNewIdentity) {
-        // PUT keys first (purges any stale OPKs), then upload a fresh pool — so
-        // a reinstall's prekeys land cleanly instead of colliding with old ones.
-        try {
-          await apiBinaryRequest('PUT', '/auth/keys', serializeBundle(pub), res.token);
-        } catch (keyErr) {
-          console.warn('pubkey bundle upload failed', keyErr);
-        }
-        try {
-          const opks = mintOpks(identity, OPK_INITIAL_COUNT);
-          await apiBinaryRequest('POST', '/auth/prekeys', serializeOpkUpload(opks), res.token);
-        } catch (opkErr) {
-          console.warn('opk upload failed', opkErr);
-        }
-      }
-
+      // Persist locally and advance the UI IMMEDIATELY. The bundle upload is moved
+      // OFF the critical path so sign-in no longer waits on it; it publishes a
+      // moment later, well before the user can start a chat.
       try {
         await Promise.all([
           saveIdentity(res.user_id, identity),
           saveSession({
-            token: res.token,
             userId: res.user_id,
             phone: res.phone,
             inboxId: res.inbox_id,
+            authSecHex: hex(authKp.sec),
+            authPubHex: hex(authKp.pub),
+            revEpoch: res.rev_epoch,
           }),
         ]);
       } catch (persistErr) {
@@ -255,13 +299,30 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
 
       set({
         pending: false,
-        token: res.token,
+        token: res.user_id,
         userId: res.user_id,
         phone: res.phone,
         inboxId: res.inbox_id,
         identity,
         fingerprint: identityFingerprint(pub),
       });
+
+      // Background: publish a brand-new identity's 128-byte directory bundle
+      // (idX ‖ idEd ‖ sig). That's the whole key publication under 3.0 — no
+      // prekey pool to mint or refill.
+      if (isNewIdentity) {
+        void (async () => {
+          try {
+            await apiBinaryRequest('PUT', '/auth/keys', serializeBundle(pub), undefined);
+          } catch (keyErr) {
+            console.warn('pubkey bundle upload failed', keyErr);
+          }
+        })();
+      }
+
+      // Restore this account's owner-encrypted profile (name/username/bio) from
+      // the cloud on an existing-account login; a brand-new account has none yet.
+      if (!res.is_new) void pullProfile(identity);
 
       // Mirror the account's server-side passcode state into local settings so
       // the toggle and gate agree.
@@ -290,19 +351,50 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
       set({ pending: false, error: msg });
     }
   },
-  submitProfile: () => {
-    const { username, firstName, lastName, pending } = get();
+  checkUsername: async (u: string) => {
+    if (!isValidUsername(u)) {
+      set({ usernameStatus: 'invalid' });
+      return;
+    }
+    set({ usernameStatus: 'checking' });
+    try {
+      const res = await usernameCheck(u);
+      // Ignore a stale response if the input changed while it was in flight.
+      if (get().username !== u.toLowerCase()) return;
+      set({ usernameStatus: res.status });
+    } catch {
+      set({ usernameStatus: 'idle' });
+    }
+  },
+  submitProfile: async () => {
+    const { username, firstName, lastName, pending, identity } = get();
     if (pending) return;
     if (!firstName.trim()) {
       set({ error: 'Enter your first name.' });
       return;
     }
     if (!isValidUsername(username)) {
-      set({ error: 'Username must be 3-32 letters, numbers or _.' });
+      set({ error: 'Username must be 5-32 chars: a-z 0-9 . - _ +' });
+      return;
+    }
+    set({ pending: true, error: null });
+    // Claim the handle server-side (it validates availability + charset). The
+    // username is stored only as SHA-256 (SudoProto 3.0 §0.1.4).
+    try {
+      await usernameClaim(username);
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? e.status === 400
+            ? 'That username is taken or invalid.'
+            : e.message
+          : 'Could not set username. Check connection.';
+      set({ pending: false, usernameStatus: 'taken', error: msg });
       return;
     }
     useAppStore.getState().applySignupProfile({ username, firstName, lastName });
-    set({ step: 'welcome', error: null });
+    if (identity) void pushProfile(identity);
+    set({ pending: false, step: 'welcome', error: null, usernameStatus: 'available' });
   },
   submitPasscode: async () => {
     const { passcode, pending, token, userId } = get();
@@ -376,36 +468,6 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     set({ error: null });
     useBootStore.getState().succeed();
   },
-  refillOpksIfLow: async () => {
-    const { token, identity, userId } = get();
-    if (!token || !identity || !userId) return;
-    try {
-      const countBytes = await apiBinaryRequest(
-        'GET',
-        '/auth/prekeys/count',
-        undefined,
-        token,
-      );
-      if (countBytes.length < 4) return;
-      const unclaimed =
-        (countBytes[0] |
-          (countBytes[1] << 8) |
-          (countBytes[2] << 16) |
-          (countBytes[3] << 24)) >>>
-        0;
-      if (unclaimed >= OPK_REFILL_THRESHOLD) return;
-      const fresh = mintOpks(identity, OPK_REFILL_BATCH);
-      await apiBinaryRequest(
-        'POST',
-        '/auth/prekeys',
-        serializeOpkUpload(fresh),
-        token,
-      );
-      await saveIdentity(userId, identity);
-    } catch (e) {
-      console.warn('opk refill failed', e);
-    }
-  },
   goBack: () =>
     set({
       step: 'phone',
@@ -420,11 +482,13 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     // this device restores them and stays decryptable (cloud-sync feel). A
     // different account simply loads its own slots.
     void clearSession();
+    clearSiscSigner();
     // Different account next: wipe the device-local profile/settings mirror so
-    // one account's name/passcode-toggle doesn't bleed into another, and clear
-    // in-memory chats immediately so the next account never sees them.
+    // one account's name/passcode-toggle doesn't bleed into another. In-memory
+    // chats are cleared by the App effect when inboxId drops to null below
+    // (hydrateChats' no-account branch) — done there to avoid a store import
+    // cycle (useChatStore already imports useIdentityStore).
     void useAppStore.getState().resetProfile();
-    useChatStore.getState().clearLocal();
     set({
       step: 'phone',
       phone: '',
@@ -450,6 +514,7 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     // kept so re-auth is one tap. inboxId→null lets the App effect clear the
     // in-memory chats until re-login reloads them.
     void clearSession();
+    clearSiscSigner();
     set({
       step: 'phone',
       code: '',
@@ -464,3 +529,14 @@ export const useIdentityStore = create<IdentityState>((set, get) => ({
     });
   },
 }));
+
+// Re-upload the owner-encrypted profile whenever local profile data changes
+// (debounced). No-op until an identity exists. SudoProto 3.0 §0.1.4.
+let profileSyncTimer: ReturnType<typeof setTimeout> | null = null;
+setProfileSyncTrigger(() => {
+  if (profileSyncTimer) clearTimeout(profileSyncTimer);
+  profileSyncTimer = setTimeout(() => {
+    const { identity } = useIdentityStore.getState();
+    if (identity) void pushProfile(identity);
+  }, 1500);
+});

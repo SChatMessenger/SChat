@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import {
   KeyboardAvoidingView,
   Platform,
@@ -12,6 +13,7 @@ import { useIdentityStore } from '../../store';
 import { useTheme, type Theme } from '../../theme';
 
 const ERROR_RED = '#ef4444';
+const OK_GREEN = '#16a34a';
 
 export function ProfileSetupScreen() {
   const theme = useTheme();
@@ -24,6 +26,26 @@ export function ProfileSetupScreen() {
   const setFirstName = useIdentityStore((s) => s.setFirstName);
   const setLastName = useIdentityStore((s) => s.setLastName);
   const submitProfile = useIdentityStore((s) => s.submitProfile);
+  const usernameStatus = useIdentityStore((s) => s.usernameStatus);
+  const checkUsername = useIdentityStore((s) => s.checkUsername);
+
+  // Debounced live availability: invalid / checking / available / taken.
+  useEffect(() => {
+    if (!username) return;
+    const t = setTimeout(() => void checkUsername(username), 400);
+    return () => clearTimeout(t);
+  }, [username, checkUsername]);
+
+  const usernameHint =
+    usernameStatus === 'checking'
+      ? { text: 'Checking…', color: theme.colors.textMuted }
+      : usernameStatus === 'available'
+        ? { text: `@${username} is available`, color: OK_GREEN }
+        : usernameStatus === 'taken'
+          ? { text: 'That username is taken', color: ERROR_RED }
+          : usernameStatus === 'invalid'
+            ? { text: '5-32 chars: a-z 0-9 . - _ +', color: ERROR_RED }
+            : null;
 
   return (
     <KeyboardAvoidingView
@@ -75,6 +97,16 @@ export function ProfileSetupScreen() {
           editable={!pending}
           prefix="@"
         />
+        {username && usernameHint ? (
+          <Text
+            style={[
+              theme.typography.caption,
+              { color: usernameHint.color, marginTop: theme.spacing.xs },
+            ]}
+          >
+            {usernameHint.text}
+          </Text>
+        ) : null}
 
         {error ? (
           <Text

@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noEmit": true,
+    "paths": {
+      "expo-crypto": ["./stubs/expo-crypto.ts"]
+    }
+  },
+  "include": ["./**/*.ts", "../src/services/crypto/**/*.ts"]
+}

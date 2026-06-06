@@ -19,6 +19,7 @@ export function ChatListScreen() {
   const openCompose = useChatStore((s) => s.openCompose);
   const fetchInbox = useChatStore((s) => s.fetchInbox);
   const deleteConversation = useChatStore((s) => s.deleteConversation);
+  const debugStatus = useChatStore((s) => s.debugStatus);
 
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState('');
@@ -43,7 +44,9 @@ export function ChatListScreen() {
 
   useEffect(() => {
     void fetchInbox();
-    const id = setInterval(() => void fetchInbox(), 8000);
+    // Instant delivery is handled by the app-wide long-poll stream; this slow
+    // interval is just a safety-net fallback in case that loop is interrupted.
+    const id = setInterval(() => void fetchInbox(), 15000);
     return () => clearInterval(id);
   }, [fetchInbox]);
 
@@ -181,6 +184,26 @@ export function ChatListScreen() {
       >
         <Text style={[styles.fabGlyph, { color: theme.colors.onPrimary }]}>+</Text>
       </PressableScale>
+
+      {debugStatus ? (
+        <View
+          pointerEvents="none"
+          style={{
+            position: 'absolute',
+            left: theme.spacing.lg,
+            right: 84,
+            bottom: tabClearance + theme.spacing.sm,
+          }}
+        >
+          <Text
+            numberOfLines={2}
+            style={[theme.typography.caption, { color: theme.colors.textMuted, fontSize: 10 }]}
+          >
+            {debugStatus}
+          </Text>
+        </View>
+      ) : null}
+
       <StatusBar style={theme.scheme === 'dark' ? 'light' : 'dark'} />
     </View>
   );

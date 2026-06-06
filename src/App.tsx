@@ -97,10 +97,24 @@ function AppContent() {
   useEffect(() => {
     const sub = AppState.addEventListener('change', (s) => {
       if (s === 'active') {
-        void useIdentityStore.getState().refillOpksIfLow();
+        // Foregrounding: pull any messages that arrived while away, right now —
+        // don't wait for the next poll tick.
+        void useChatStore.getState().fetchInbox();
+      } else {
+        // Leaving the foreground: flush RAM-only chat state to the cloud now so
+        // nothing is lost when the app is closed (no local cache).
+        useChatStore.getState().flushChatState();
       }
     });
     return () => sub.remove();
+  }, []);
+
+  // Real-time delivery: a long-poll loop held open by the server and woken the
+  // instant a message lands (MTProto-style, no WebSocket). Runs app-wide so
+  // delivery works on any screen; idles until signed in.
+  useEffect(() => {
+    useChatStore.getState().startInboxStream();
+    return () => useChatStore.getState().stopInboxStream();
   }, []);
 
   if (!idHydrated || !chatsHydrated || !profileHydrated) return null;
