@@ -9,6 +9,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
   useWindowDimensions,
 } from 'react-native';
@@ -73,6 +74,25 @@ const REACH_ROWS: { key: keyof PrivacySettings; icon: string; label: string }[] 
   { key: 'gifts',         icon: 'lucide:gift',           label: 'Send gifts' },
 ];
 
+// Disappearing-message presets for non-verified chats (days). 0 = off.
+const TTL_PRESETS = [0, 1, 7, 30, 365];
+function ttlLabel(d: number): string {
+  switch (d) {
+    case 0:
+      return 'Off';
+    case 1:
+      return '1 day';
+    case 7:
+      return '1 week';
+    case 30:
+      return '1 month';
+    case 365:
+      return '1 year';
+    default:
+      return `${d} day${d === 1 ? '' : 's'}`;
+  }
+}
+
 function strengthOf(s: SecuritySettings): { score: number; label: string; color: string } {
   let n = 0;
   if (s.twoFactor) n++;
@@ -104,6 +124,39 @@ export function PrivacySecurityScreen() {
   const [picker, setPicker] = useState<{ key: keyof PrivacySettings; label: string } | null>(null);
   const [personaOpen, setPersonaOpen] = useState(false);
   const [passcodeOpen, setPasscodeOpen] = useState(false);
+  const [ttlOpen, setTtlOpen] = useState(false);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customDraft, setCustomDraft] = useState('');
+
+  // Disappearing window for NON-verified chats: presets + a custom day count.
+  const ttlOptions: OptionItem<string>[] = [
+    { key: 'off', label: 'Off', blurb: 'Keep chats with non-contacts forever.' },
+    { key: '1', label: '1 day' },
+    { key: '7', label: '1 week' },
+    { key: '30', label: '1 month' },
+    { key: '365', label: '1 year' },
+    { key: 'custom', label: 'Custom…', blurb: 'Choose your own number of days.' },
+  ];
+  const ttlValue = TTL_PRESETS.includes(security.unverifiedTtlDays)
+    ? security.unverifiedTtlDays === 0
+      ? 'off'
+      : String(security.unverifiedTtlDays)
+    : 'custom';
+  const onPickTtl = (v: string) => {
+    if (v === 'custom') {
+      setCustomDraft(security.unverifiedTtlDays > 0 ? String(security.unverifiedTtlDays) : '');
+      setTtlOpen(false);
+      setCustomOpen(true);
+      return;
+    }
+    setSecurity('unverifiedTtlDays', v === 'off' ? 0 : Number(v));
+    setTtlOpen(false);
+  };
+  const saveCustomTtl = () => {
+    const n = Math.max(0, Math.min(3650, Math.round(Number(customDraft) || 0)));
+    setSecurity('unverifiedTtlDays', n);
+    setCustomOpen(false);
+  };
 
   const slide = useSlideIn();
   const onBack = useCallback(() => slide.close(close), [slide, close]);
@@ -121,9 +174,17 @@ export function PrivacySecurityScreen() {
       setPasscodeOpen(false);
       return true;
     }
+    if (customOpen) {
+      setCustomOpen(false);
+      return true;
+    }
+    if (ttlOpen) {
+      setTtlOpen(false);
+      return true;
+    }
     onBack();
     return true;
-  }, [picker, personaOpen, passcodeOpen, onBack]));
+  }, [picker, personaOpen, passcodeOpen, customOpen, ttlOpen, onBack]));
 
   const strength = strengthOf(security);
   const stub = (what: string) =>
@@ -336,6 +397,13 @@ export function PrivacySecurityScreen() {
             />
             <ActionRow
               theme={theme}
+              icon="lucide:hourglass"
+              label="Disappear for non-contacts"
+              value={ttlLabel(security.unverifiedTtlDays)}
+              onPress={() => setTtlOpen(true)}
+            />
+            <ActionRow
+              theme={theme}
               icon="lucide:user-x"
               label="Blocked users"
               value={`${security.blockedCount}`}
@@ -398,13 +466,92 @@ export function PrivacySecurityScreen() {
         onDismiss={() => setPersonaOpen(false)}
       />
 
+      <OptionSheet
+        visible={ttlOpen}
+        title="Disappear for non-contacts"
+        options={ttlOptions}
+        value={ttlValue}
+        onChange={onPickTtl}
+        onDismiss={() => setTtlOpen(false)}
+      />
+
+      <Modal
+        visible={customOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCustomOpen(false)}
+      >
+        <Pressable style={styles.customBackdrop} onPress={() => setCustomOpen(false)}>
+          <Pressable
+            onPress={() => undefined}
+            style={[
+              styles.customCard,
+              { backgroundColor: theme.colors.surface, borderRadius: theme.radii.lg },
+            ]}
+          >
+            <Text style={[theme.typography.title, { color: theme.colors.text }]}>
+              Custom window
+            </Text>
+            <Text
+              style={[
+                theme.typography.caption,
+                { color: theme.colors.textMuted, marginTop: 4 },
+              ]}
+            >
+              Disappear chats with non-contacts after this many days (0 = off).
+            </Text>
+            <View style={styles.customInputRow}>
+              <TextInput
+                value={customDraft}
+                onChangeText={(t) => setCustomDraft(t.replace(/[^\d]/g, '').slice(0, 4))}
+                keyboardType="number-pad"
+                autoFocus
+                placeholder="30"
+                placeholderTextColor={theme.colors.textMuted}
+                onSubmitEditing={saveCustomTtl}
+                style={[
+                  styles.customInput,
+                  {
+                    color: theme.colors.text,
+                    borderColor: theme.colors.border,
+                    backgroundColor: theme.colors.background,
+                  },
+                ]}
+              />
+              <Text style={[theme.typography.body, { color: theme.colors.textMuted, marginLeft: 10 }]}>
+                days
+              </Text>
+            </View>
+            <View style={styles.customActions}>
+              <Pressable
+                onPress={() => setCustomOpen(false)}
+                style={({ pressed }) => [styles.customBtn, { opacity: pressed ? 0.6 : 1 }]}
+              >
+                <Text style={[theme.typography.body, { color: theme.colors.textMuted }]}>
+                  Cancel
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={saveCustomTtl}
+                style={({ pressed }) => [styles.customBtn, { opacity: pressed ? 0.6 : 1 }]}
+              >
+                <Text style={[theme.typography.body, { color: theme.colors.primary, fontWeight: '700' }]}>
+                  Save
+                </Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       <SetPasscodeSheet
         visible={passcodeOpen}
         theme={theme}
         onCancel={() => setPasscodeOpen(false)}
         onDone={async (pin) => {
           if (!token || !userId) throw new Error('not signed in');
-          // Store the per-account salted hash on the server (two-step PIN).
+          // Store the per-account salted hash on the server (two-step PIN). This is
+          // just an app-lock; cloud restore is automatic (server-keyed vault, §0.1.5).
           await apiJsonPut('/auth/passcode', { hash: passcodeHash(userId, pin) }, token);
           setSecurity('appPasscode', true);
           setPasscodeOpen(false);
@@ -704,6 +851,25 @@ function ActionRow({
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  customBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  customCard: { width: '100%', maxWidth: 360, padding: 20 },
+  customInputRow: { flexDirection: 'row', alignItems: 'center', marginTop: 16 },
+  customInput: {
+    flex: 1,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 17,
+  },
+  customActions: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 18, gap: 8 },
+  customBtn: { paddingHorizontal: 16, paddingVertical: 8 },
   valuePill: {
     flexDirection: 'row',
     alignItems: 'center',

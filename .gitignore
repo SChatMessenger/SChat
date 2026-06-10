@@ -45,3 +45,6 @@ yarn-error.*
 
 # claude
 .claude
+# Rust crypto native libs — built by `npm run rust:android` (local) or the EAS
+# eas-build-pre-install hook (cloud). Never committed.
+/android/app/src/main/jniLibs/

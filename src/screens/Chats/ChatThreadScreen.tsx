@@ -5,7 +5,6 @@ import {
   FlatList,
   I18nManager,
   KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -17,7 +16,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { BlurView } from 'expo-blur';
 import { Iconify } from 'react-native-iconify';
-import { useChatStore, useIdentityStore, type Conversation, type Message } from '../../store';
+import {
+  useChatStore,
+  useIdentityStore,
+  type Message,
+  type MsgStatus,
+} from '../../store';
 import { useTheme, type Theme } from '../../theme';
 import { useHardwareBack } from '../../hooks';
 import { BottomSheet, IconButton } from '../../components';
@@ -65,15 +69,13 @@ export function ChatThreadScreen() {
   );
   const myInbox = useIdentityStore((s) => s.inboxId);
   const sendMessage = useChatStore((s) => s.sendMessage);
-  const closeConversation = useChatStore((s) => s.closeConversation);
   const openChatProfile = useChatStore((s) => s.openChatProfile);
+  const closeConversation = useChatStore((s) => s.closeConversation);
   const startCall = useChatStore((s) => s.startCall);
-  const setConversationVerified = useChatStore((s) => s.setConversationVerified);
   const deleteConversation = useChatStore((s) => s.deleteConversation);
   const deleteMessage = useChatStore((s) => s.deleteMessage);
 
   const [draft, setDraft] = useState('');
-  const [verifyOpen, setVerifyOpen] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [callMenuOpen, setCallMenuOpen] = useState(false);
@@ -114,13 +116,11 @@ export function ChatThreadScreen() {
         setCallMenuOpen(false);
       } else if (selected) {
         setSelected(null);
-      } else if (verifyOpen) {
-        setVerifyOpen(false);
       } else {
         closeConversation();
       }
       return true;
-    }, [attachOpen, menuOpen, callMenuOpen, selected, verifyOpen, closeConversation]),
+    }, [attachOpen, menuOpen, callMenuOpen, selected, closeConversation]),
   );
 
   if (!activeId || !conversation) return null;
@@ -158,15 +158,6 @@ export function ChatThreadScreen() {
       onPress: () => {
         setMenuOpen(false);
         openChatProfile();
-      },
-    },
-    {
-      key: 'verify',
-      label: 'Verify safety number',
-      icon: 'lucide:shield-check',
-      onPress: () => {
-        setMenuOpen(false);
-        setVerifyOpen(true);
       },
     },
     {
@@ -250,9 +241,8 @@ export function ChatThreadScreen() {
       ]
     : [];
 
-  const peerFingerprint = conversation.peerFingerprint ?? '????????';
   const verifiedBadgeColor = conversation.verified ? VERIFIED_GREEN : UNVERIFIED_AMBER;
-  const verifiedLabel = conversation.verified ? 'verified' : 'tap to verify';
+  const verifiedLabel = conversation.verified ? 'Verified contact' : 'Tap to verify';
 
   return (
     <View style={[styles.flex, { backgroundColor: theme.colors.background }]}>
@@ -298,21 +288,14 @@ export function ChatThreadScreen() {
               <Text numberOfLines={1} style={[styles.threadName, { color: theme.colors.text }]}>
                 {conversation.name}
               </Text>
-              <Pressable
-                onPress={() => setVerifyOpen(true)}
-                hitSlop={6}
-                style={styles.verifiedLine}
-              >
+              <Pressable onPress={openChatProfile} hitSlop={6} style={styles.verifiedLine}>
                 <Text style={[styles.verifiedCheck, { color: verifiedBadgeColor }]}>
                   {conversation.verified ? '✓' : '!'}
                 </Text>
                 <Text
-                  style={[
-                    styles.verifiedText,
-                    { color: theme.colors.textMuted, fontVariant: ['tabular-nums'] },
-                  ]}
+                  style={[styles.verifiedText, { color: theme.colors.textMuted }]}
                 >
-                  {verifiedLabel} · {peerFingerprint}
+                  {verifiedLabel}
                 </Text>
               </Pressable>
             </View>
@@ -501,13 +484,6 @@ export function ChatThreadScreen() {
         theme={theme}
         onDismiss={() => setSelected(null)}
       />
-      <SafetyNumberModal
-        visible={verifyOpen}
-        conversation={conversation}
-        theme={theme}
-        onClose={() => setVerifyOpen(false)}
-        onToggleVerified={(v) => setConversationVerified(conversation.id, v)}
-      />
     </View>
   );
 }
@@ -604,128 +580,6 @@ function ActionRow({ action, theme }: { action: SheetAction; theme: Theme }) {
   );
 }
 
-function SafetyNumberModal({
-  visible,
-  conversation,
-  theme,
-  onClose,
-  onToggleVerified,
-}: {
-  visible: boolean;
-  conversation: Conversation;
-  theme: Theme;
-  onClose: () => void;
-  onToggleVerified: (v: boolean) => void;
-}) {
-  const number = conversation.safetyNumber ?? '— not available —';
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={modalStyles.backdrop}>
-        <View style={[modalStyles.card, { backgroundColor: theme.colors.surface }]}>
-          <Text style={[theme.typography.title, { color: theme.colors.text }]}>
-            Safety number
-          </Text>
-          <Text
-            style={[
-              theme.typography.caption,
-              { color: theme.colors.textMuted, marginTop: 4 },
-            ]}
-          >
-            Compare these 60 digits with {conversation.name} over a trusted channel.
-            If they match, this session has not been MITM'd.
-          </Text>
-
-          <View style={modalStyles.numberBox}>
-            <Text
-              style={[
-                modalStyles.numberText,
-                {
-                  color: theme.colors.text,
-                  fontVariant: ['tabular-nums'],
-                },
-              ]}
-            >
-              {number}
-            </Text>
-          </View>
-
-          <Text
-            style={[
-              theme.typography.caption,
-              { color: theme.colors.textMuted, marginTop: theme.spacing.md },
-            ]}
-          >
-            Peer key fingerprint: {conversation.peerFingerprint ?? '—'}
-          </Text>
-
-          <View style={modalStyles.actions}>
-            <Pressable
-              onPress={() => {
-                onToggleVerified(!conversation.verified);
-                onClose();
-              }}
-              style={({ pressed }) => [
-                modalStyles.btn,
-                {
-                  backgroundColor: conversation.verified
-                    ? theme.colors.surface
-                    : VERIFIED_GREEN,
-                  borderColor: theme.colors.border,
-                  borderWidth: StyleSheet.hairlineWidth,
-                  opacity: pressed ? 0.7 : 1,
-                },
-              ]}
-            >
-              <Text
-                style={{
-                  color: conversation.verified ? theme.colors.text : '#fff',
-                  fontWeight: '600',
-                }}
-              >
-                {conversation.verified ? 'Mark unverified' : 'Mark verified'}
-              </Text>
-            </Pressable>
-            <Pressable
-              onPress={onClose}
-              style={({ pressed }) => [
-                modalStyles.btn,
-                {
-                  backgroundColor: theme.colors.background,
-                  borderColor: theme.colors.border,
-                  borderWidth: StyleSheet.hairlineWidth,
-                  opacity: pressed ? 0.7 : 1,
-                },
-              ]}
-            >
-              <Text style={{ color: theme.colors.text }}>Close</Text>
-            </Pressable>
-          </View>
-        </View>
-      </View>
-    </Modal>
-  );
-}
-
-const modalStyles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  card: { padding: 20, borderRadius: 16 },
-  numberBox: { marginTop: 16 },
-  numberText: { fontSize: 18, lineHeight: 26, letterSpacing: 1, fontWeight: '600' },
-  actions: { flexDirection: 'row', gap: 12, marginTop: 20 },
-  btn: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
-
 function Bubble({
   message,
   theme,
@@ -795,20 +649,39 @@ function Bubble({
         >
           {message.text}
         </Text>
-        <Text
-          style={[
-            styles.timeText,
-            {
-              alignSelf: ALIGN_RIGHT,
-              color: mine ? theme.colors.onPrimary : theme.colors.textMuted,
-              opacity: mine ? 0.75 : 1,
-            },
-          ]}
-        >
-          {time}
-        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', alignSelf: ALIGN_RIGHT, gap: 3 }}>
+          <Text
+            style={[
+              styles.timeText,
+              {
+                color: mine ? theme.colors.onPrimary : theme.colors.textMuted,
+                opacity: mine ? 0.75 : 1,
+              },
+            ]}
+          >
+            {time}
+          </Text>
+          {mine && message.status ? <StatusTick status={message.status} theme={theme} /> : null}
+        </View>
       </Pressable>
     </View>
+  );
+}
+
+// Delivery state next to the timestamp on my bubbles: ⏳ sending → ✓ sent →
+// ✓✓ delivered → ✓✓ read (read is tinted to stand out, Telegram/WhatsApp-style).
+function StatusTick({ status, theme }: { status: MsgStatus; theme: Theme }) {
+  if (status === 'sending') {
+    return <Iconify icon="lucide:clock" size={11} color={theme.colors.onPrimary} />;
+  }
+  const icon = status === 'sent' ? 'lucide:check' : 'lucide:check-check';
+  const read = status === 'read';
+  return (
+    <Iconify
+      icon={icon}
+      size={13}
+      color={read ? '#5BC8FF' : theme.colors.onPrimary}
+    />
   );
 }
 

@@ -18,15 +18,16 @@ import { Iconify } from 'react-native-iconify';
 import { StatusBar } from 'expo-status-bar';
 import { useChatStore } from '../../store';
 import { useTheme, type Theme } from '../../theme';
-import { Card, GlassHeader, IconButton, SectionLabel, SettingsRow } from '../../components';
+import { Card, GlassHeader, IconButton, SectionLabel } from '../../components';
 import { useHardwareBack, useSlideIn } from '../../hooks';
+import { QrVerifyModal } from './QrVerifyModal';
 
 const VERIFIED_GREEN = '#22c55e';
 const UNVERIFIED_AMBER = '#f59e0b';
 const DANGER = '#ff453a';
-const REVERIFY_INTERVALS = ['30 days', '90 days', '6 months'] as const;
 const VERIFIED_TINT = 'rgba(34,197,94,0.12)';
 const UNVERIFIED_TINT = 'rgba(245,158,11,0.12)';
+const KEY_CHANGED_TINT = 'rgba(255,69,58,0.12)';
 const CONTENT_MAX_WIDTH = 560;
 const MONO = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' });
 
@@ -64,18 +65,16 @@ export function ContactProfileScreen() {
     s.conversations.find((c) => c.id === s.activeConversationId),
   );
   const closeChatProfile = useChatStore((s) => s.closeChatProfile);
-  const setConversationVerified = useChatStore((s) => s.setConversationVerified);
   const editContact = useChatStore((s) => s.editContact);
   const deleteConversation = useChatStore((s) => s.deleteConversation);
+  const blockContact = useChatStore((s) => s.blockContact);
 
   const [muted, setMuted] = useState(false);
   const [headerH, setHeaderH] = useState(insets.top + 64);
-  const [safetyOpen, setSafetyOpen] = useState(false);
+  const [qrVerifyOpen, setQrVerifyOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [phoneDraft, setPhoneDraft] = useState('');
-  const [reverifyOn, setReverifyOn] = useState(false);
-  const [reverifyIdx, setReverifyIdx] = useState(0);
   const [cloaked, setCloaked] = useState(false);
   const [screenshotGuard, setScreenshotGuard] = useState(false);
   const [receiptBlackout, setReceiptBlackout] = useState(false);
@@ -152,11 +151,6 @@ export function ContactProfileScreen() {
     cascadeIn();
   }, [cascadeIn]);
 
-  const toggleSafety = useCallback(() => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setSafetyOpen((v) => !v);
-  }, []);
-
   const slide = useSlideIn();
   const onBack = useCallback(() => slide.close(closeChatProfile), [slide, closeChatProfile]);
   useHardwareBack(
@@ -169,19 +163,19 @@ export function ContactProfileScreen() {
   if (!conversation) return null;
 
   const verified = conversation.verified;
-  const fingerprint = conversation.peerFingerprint
-    ? groupHex(conversation.peerFingerprint)
-    : '—';
-  const safetyNumber = conversation.safetyNumber;
   const statusColor = verified ? VERIFIED_GREEN : UNVERIFIED_AMBER;
 
   const confirmBlock = () => {
     Alert.alert(
       `Block ${conversation.name}?`,
-      'They will no longer be able to message or call you, and they won’t be told.',
+      'They will no longer be able to message or call you, and your verification is cleared — you’ll need to scan again to re-verify.',
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Block', style: 'destructive', onPress: () => undefined },
+        {
+          text: 'Block',
+          style: 'destructive',
+          onPress: () => blockContact(conversation.id),
+        },
       ],
     );
   };
@@ -195,19 +189,6 @@ export function ContactProfileScreen() {
     if (conversation && nameDraft.trim()) editContact(conversation.id, nameDraft, phoneDraft);
     setEditOpen(false);
   };
-
-  const verifyInPerson = () => {
-    Alert.alert(
-      'Verify in person',
-      `Hold both phones together and scan ${conversation.name}’s QR — or read the safety number aloud. A match means no one is in the middle.`,
-      [
-        { text: 'Not now', style: 'cancel' },
-        { text: 'Open scanner', onPress: () => undefined },
-      ],
-    );
-  };
-
-  const cycleReverify = () => setReverifyIdx((i) => (i + 1) % REVERIFY_INTERVALS.length);
 
   const confirmBurn = () => {
     Alert.alert(
@@ -329,6 +310,16 @@ export function ContactProfileScreen() {
             >
               {conversation.name}
             </Text>
+            {conversation.username ? (
+              <Text
+                style={[
+                  theme.typography.body,
+                  { color: theme.colors.textMuted, marginTop: 2 },
+                ]}
+              >
+                @{conversation.username}
+              </Text>
+            ) : null}
             {conversation.phone ? (
               <Text
                 style={[
@@ -378,120 +369,107 @@ export function ContactProfileScreen() {
             <QuickAction icon="lucide:search" label="Search" onPress={onBack} theme={theme} />
           </View>
 
-          <SectionLabel label="Trust center" />
-          <Card>
-            <SettingsRow
-              icon={verified ? 'lucide:shield-check' : 'lucide:shield-alert'}
-              iconColor={verified ? VERIFIED_GREEN : UNVERIFIED_AMBER}
-              label={verified ? 'Verified' : 'Not verified'}
-              subtitle={
-                verified
-                  ? 'You confirmed this contact’s identity.'
-                  : 'Compare the safety number to confirm.'
-              }
-              toggle={{
-                value: verified,
-                onValueChange: (v) => setConversationVerified(conversation.id, v),
-              }}
-            />
-            <Divider theme={theme} />
-            <SettingsRow
-              icon="lucide:key-round"
-              label="Identity key"
-              subtitle={verified ? 'Unchanged since you verified.' : 'Not verified yet.'}
-              value={verified ? 'Stable' : '—'}
-            />
-            <Divider theme={theme} />
-            <View style={styles.row}>
-              <Iconify icon="lucide:fingerprint" size={18} color={theme.colors.textMuted} />
-              <View style={{ flex: 1, marginLeft: theme.spacing.md }}>
-                <Text style={[theme.typography.body, { color: theme.colors.text }]}>
-                  Peer fingerprint
-                </Text>
-                <Text style={[styles.fingerprint, { color: theme.colors.textMuted, marginTop: 3 }]}>
-                  {fingerprint}
-                </Text>
-              </View>
+          {verified && conversation.peerProfile ? (
+            <>
+              <SectionLabel label="Profile" />
+              <Card>
+                {conversation.peerProfile.bio ? (
+                  <InfoRow theme={theme} icon="lucide:align-left" label="Bio" value={conversation.peerProfile.bio} />
+                ) : null}
+                {conversation.peerProfile.dob ? (
+                  <InfoRow theme={theme} icon="lucide:cake" label="Birthday" value={conversation.peerProfile.dob} />
+                ) : null}
+                {conversation.peerProfile.region ? (
+                  <InfoRow theme={theme} icon="lucide:map-pin" label="Region" value={conversation.peerProfile.region} />
+                ) : null}
+                {!conversation.peerProfile.bio &&
+                !conversation.peerProfile.dob &&
+                !conversation.peerProfile.region ? (
+                  <InfoRow theme={theme} icon="lucide:user" label="Profile" value="No extra details shared yet." />
+                ) : null}
+              </Card>
+            </>
+          ) : !verified ? (
+            <View
+              style={[
+                styles.lockedHint,
+                { backgroundColor: theme.colors.surface, borderColor: theme.colors.border, borderRadius: theme.radii.md },
+              ]}
+            >
+              <Iconify icon="lucide:lock" size={16} color={theme.colors.textMuted} />
+              <Text
+                style={[
+                  theme.typography.caption,
+                  { color: theme.colors.textMuted, marginLeft: 8, flex: 1 },
+                ]}
+              >
+                Verify {conversation.name} to unlock their full profile — bio, birthday and more.
+              </Text>
             </View>
-            <Divider theme={theme} />
+          ) : null}
+
+          <SectionLabel label="Verification" />
+          {conversation.keyChanged ? (
             <Pressable
-              onPress={toggleSafety}
+              onPress={() => setQrVerifyOpen(true)}
               accessibilityRole="button"
-              accessibilityState={{ expanded: safetyOpen }}
-              accessibilityLabel="Safety number"
+              accessibilityLabel="Security key changed — scan their code again"
+              style={({ pressed }) => [
+                styles.warnBanner,
+                {
+                  backgroundColor: KEY_CHANGED_TINT,
+                  borderRadius: theme.radii.md,
+                  marginBottom: theme.spacing.sm,
+                  opacity: pressed ? 0.7 : 1,
+                },
+              ]}
+            >
+              <Iconify icon="lucide:shield-alert" size={18} color={DANGER} />
+              <Text
+                style={[
+                  theme.typography.caption,
+                  { color: DANGER, marginLeft: 8, flex: 1, fontWeight: '600' },
+                ]}
+              >
+                Their security key changed — scan their contact code again to re-verify.
+              </Text>
+            </Pressable>
+          ) : null}
+          {/* One plain-language entry: scan their contact code to become verified
+              contacts. The crypto (key pinning) happens underneath — no jargon. */}
+          <Card>
+            <Pressable
+              onPress={() => setQrVerifyOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel={verified ? 'Verified contact' : 'Verify contact'}
               style={({ pressed }) => [
                 styles.row,
                 { alignItems: 'center', backgroundColor: pressed ? theme.colors.background : 'transparent' },
               ]}
             >
-              <Iconify icon="lucide:lock" size={18} color={theme.colors.textMuted} />
-              <Text
-                style={[
-                  theme.typography.body,
-                  { color: theme.colors.text, marginLeft: theme.spacing.md, flex: 1 },
-                ]}
-              >
-                Safety number
-              </Text>
               <Iconify
-                icon={safetyOpen ? 'lucide:chevron-down' : 'lucide:chevron-right'}
-                size={16}
-                color={theme.colors.textMuted}
+                icon={verified ? 'lucide:shield-check' : 'lucide:qr-code'}
+                size={18}
+                color={verified ? VERIFIED_GREEN : theme.colors.primary}
               />
-            </Pressable>
-            {safetyOpen ? (
-              <View style={styles.safetyBody}>
-                <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>
-                  Compare these 60 digits with {conversation.name} over a trusted channel.
-                  If every block matches, no one is intercepting this session.
+              <View style={{ flex: 1, marginLeft: theme.spacing.md }}>
+                <Text style={[theme.typography.body, { color: theme.colors.text }]}>
+                  {verified ? 'Verified contact' : 'Verify contact'}
                 </Text>
-                {safetyNumber ? (
-                  <SafetyNumberGrid value={safetyNumber} theme={theme} />
-                ) : (
-                  <Text
-                    style={[
-                      styles.numberUnavailable,
-                      theme.typography.caption,
-                      { color: theme.colors.textMuted },
-                    ]}
-                  >
-                    Not available yet — exchange a message first.
-                  </Text>
-                )}
+                <Text
+                  style={[
+                    theme.typography.caption,
+                    { color: verified ? VERIFIED_GREEN : theme.colors.textMuted, marginTop: 2 },
+                  ]}
+                >
+                  {verified
+                    ? 'You scanned each other’s code — full profile unlocked.'
+                    : 'Scan their contact code to verify and see their full profile.'}
+                </Text>
               </View>
-            ) : null}
-            <Divider theme={theme} />
-            <SettingsRow
-              icon="lucide:camera"
-              label="Verify in person"
-              subtitle="Scan their QR to confirm the safety number."
-              chevron
-              onPress={verifyInPerson}
-            />
+              <Iconify icon="lucide:chevron-right" size={16} color={theme.colors.textMuted} />
+            </Pressable>
           </Card>
-
-          <View style={{ marginTop: theme.spacing.sm }}>
-            <Card>
-              <SettingsRow
-                icon="lucide:bell"
-                label="Re-verify reminder"
-                subtitle="Nudge me to re-check their key periodically."
-                toggle={{ value: reverifyOn, onValueChange: setReverifyOn }}
-              />
-              {reverifyOn ? (
-                <>
-                  <Divider theme={theme} />
-                  <SettingsRow
-                    icon="lucide:calendar-clock"
-                    label="Remind me every"
-                    value={REVERIFY_INTERVALS[reverifyIdx]}
-                    chevron
-                    onPress={cycleReverify}
-                  />
-                </>
-              ) : null}
-            </Card>
-          </View>
         </View>
       </ScrollView>
       <Modal
@@ -701,6 +679,11 @@ export function ContactProfileScreen() {
           </Animated.View>
         </Pressable>
       </Modal>
+      <QrVerifyModal
+        visible={qrVerifyOpen}
+        onDismiss={() => setQrVerifyOpen(false)}
+        peerName={conversation.name}
+      />
       <StatusBar style={theme.scheme === 'dark' ? 'light' : 'dark'} />
     </Animated.View>
   );
@@ -750,39 +733,45 @@ function QuickAction({
   );
 }
 
-// 12 five-digit blocks laid out 4-per-row so each group can be read and
-// compared against the peer's screen without losing your place.
-function SafetyNumberGrid({ value, theme }: { value: string; theme: Theme }) {
-  const groups = value.split(' ').filter(Boolean);
+// A verified contact's profile detail row (bio / birthday / region).
+function InfoRow({
+  theme,
+  icon,
+  label,
+  value,
+}: {
+  theme: Theme;
+  icon: string;
+  label: string;
+  value: string;
+}) {
   return (
-    <View style={styles.grid}>
-      {groups.map((group, i) => (
-        <View key={i} style={styles.gridCell}>
-          <Text style={[styles.gridText, { color: theme.colors.text }]}>{group}</Text>
-        </View>
-      ))}
+    <View style={styles.infoRow}>
+      <Iconify icon={icon} size={18} color={theme.colors.textMuted} />
+      <View style={{ flex: 1, marginLeft: theme.spacing.md }}>
+        <Text style={[theme.typography.caption, { color: theme.colors.textMuted }]}>{label}</Text>
+        <Text style={[theme.typography.body, { color: theme.colors.text, marginTop: 2 }]}>
+          {value}
+        </Text>
+      </View>
     </View>
-  );
-}
-
-function groupHex(hex: string): string {
-  return hex.replace(/(.{4})(?=.)/g, '$1 ');
-}
-
-function Divider({ theme }: { theme: Theme }) {
-  return (
-    <View
-      style={{
-        height: StyleSheet.hairlineWidth,
-        backgroundColor: theme.colors.border,
-        marginLeft: theme.spacing.md + 18 + theme.spacing.md,
-      }}
-    />
   );
 }
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  infoRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  lockedHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
   hero: { alignItems: 'center', paddingTop: 8, paddingBottom: 8 },
   avatarWrap: { width: 96, height: 96 },
   avatar: {
@@ -868,6 +857,22 @@ const styles = StyleSheet.create({
   },
   safetyBody: { paddingHorizontal: 16, paddingBottom: 16, paddingTop: 2 },
   numberUnavailable: { marginTop: 14, fontStyle: 'italic' },
+  warnBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  keyActions: { flexDirection: 'row', gap: 10, marginTop: 16 },
+  keyBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 11,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',

@@ -60,6 +60,8 @@ module.exports = function (api) {
             'lucide:gift',
             'lucide:lock',
             'lucide:fingerprint',
+            'lucide:qr-code',
+            'lucide:shield-x',
             'lucide:timer',
             'lucide:user-x',
             'lucide:smartphone',

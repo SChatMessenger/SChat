@@ -1,28 +1,19 @@
 import { create } from 'zustand';
 
-export const bootPhases = ['identity', 'ready'] as const;
-
-export type BootPhase = (typeof bootPhases)[number];
+// The top-level app gate (App.tsx renderPhase): the auth flow runs in 'identity'
+// and the main app in 'ready'. useIdentityStore flips this to 'ready' when login
+// completes and back to 'identity' on sign-out / session-expiry.
+export type BootPhase = 'identity' | 'ready';
 
 type BootState = {
   phase: BootPhase;
-  error: string | null;
-  succeed: () => void;
-  fail: (message: string) => void;
-  retry: () => void;
+  setPhase: (phase: BootPhase) => void;
+  /** Return to the auth gate (sign-out / 401). */
   reset: () => void;
 };
 
-export const useBootStore = create<BootState>((set, get) => ({
+export const useBootStore = create<BootState>((set) => ({
   phase: 'identity',
-  error: null,
-  succeed: () => {
-    const { phase } = get();
-    const idx = bootPhases.indexOf(phase);
-    const next = bootPhases[Math.min(idx + 1, bootPhases.length - 1)];
-    set({ phase: next, error: null });
-  },
-  fail: (message) => set({ error: message }),
-  retry: () => set({ error: null }),
-  reset: () => set({ phase: 'identity', error: null }),
+  setPhase: (phase) => set({ phase }),
+  reset: () => set({ phase: 'identity' }),
 }));

@@ -16,6 +16,7 @@ import { type ThemeOverride } from '../../store/slices/useAppStore';
 import { useTheme, type Theme } from '../../theme';
 import { useThemeSwitch } from '../../theme/ThemeTransition';
 import { GlassHeader, PressableScale } from '../../components';
+import { QrVerifyModal } from '../Chats/QrVerifyModal';
 
 type MenuKey = 'account' | 'chat' | 'privacy' | 'notifications' | 'data' | 'language' | 'about' | 'help';
 
@@ -34,6 +35,7 @@ export function ProfileScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const [headerH, setHeaderH] = useState(insets.top + 76);
+  const [contactCodeOpen, setContactCodeOpen] = useState(false);
   const phone = useIdentityStore((s) => s.phone);
   const switchTheme = useThemeSwitch();
   const displayName = useAppStore((s) => s.displayName);
@@ -136,6 +138,39 @@ export function ProfileScreen() {
           </Text>
         ) : null}
 
+        <Pressable
+          onPress={() => setContactCodeOpen(true)}
+          accessibilityRole="button"
+          accessibilityLabel="My contact code"
+          style={({ pressed }) => [
+            {
+              flexDirection: 'row',
+              alignItems: 'center',
+              marginTop: theme.spacing.lg,
+              backgroundColor: theme.colors.surface,
+              borderRadius: theme.radii.md,
+              borderWidth: StyleSheet.hairlineWidth,
+              borderColor: theme.colors.border,
+              paddingVertical: theme.spacing.md,
+              paddingHorizontal: theme.spacing.md,
+              opacity: pressed ? 0.7 : 1,
+            },
+          ]}
+        >
+          <Iconify icon="lucide:qr-code" size={20} color={theme.colors.primary} />
+          <View style={{ flex: 1, marginLeft: theme.spacing.md }}>
+            <Text style={[theme.typography.body, { color: theme.colors.text }]}>
+              My contact code
+            </Text>
+            <Text
+              style={[theme.typography.caption, { color: theme.colors.textMuted, marginTop: 2 }]}
+            >
+              Share or scan a code to add verified contacts.
+            </Text>
+          </View>
+          <Iconify icon="lucide:chevron-right" size={16} color={theme.colors.textMuted} />
+        </Pressable>
+
         <Section title="Settings" theme={theme}>
           {MENU_ITEMS.map((item, i) => (
             <View key={item.label}>
@@ -198,6 +233,8 @@ export function ProfileScreen() {
           <MenuRow theme={theme} icon="lucide:log-out" label="Sign out" onPress={signOut} />
         </Section>
       </ScrollView>
+
+      <QrVerifyModal visible={contactCodeOpen} onDismiss={() => setContactCodeOpen(false)} />
 
       <StatusBar style={theme.scheme === 'dark' ? 'light' : 'dark'} />
     </View>

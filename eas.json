@@ -6,13 +6,34 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "RUSTUP_HOME": "/tmp/rustup",
+        "CARGO_HOME": "/tmp/cargo"
+      }
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "RUSTUP_HOME": "/tmp/rustup",
+        "CARGO_HOME": "/tmp/cargo"
+      }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "env": {
+        "RUSTUP_HOME": "/tmp/rustup",
+        "CARGO_HOME": "/tmp/cargo"
+      }
     }
   },
   "submit": {

@@ -1,542 +1,372 @@
+import * as Crypto from 'expo-crypto';
+import * as SecureStore from 'expo-secure-store';
 import { create } from 'zustand';
 import {
-  ApiError,
-  apiBinaryRequest,
-  apiJsonPost,
-} from '../../services/api/client';
-import { clearSiscSigner, configureSiscSigner } from '../../services/api/sisc';
-import {
-  getProfileBlob,
-  putProfileBlob,
-  usernameCheck,
-  usernameClaim,
-} from '../../services/api/profile';
-import { hex, unhex } from '../../services/crypto/primitives';
-import { decryptProfile, encryptProfile } from '../../services/crypto/profile';
-import { p256KeyGen, signRegistration } from '../../services/crypto/sisc';
-import { setProfileSyncTrigger } from '../../services/profileSyncBridge';
-import {
-  identityFingerprint,
-  newIdentity,
-  publicBundleOf,
-  serializeBundle,
-} from '../../services/crypto/keys';
-import {
-  clearSession,
-  loadIdentity,
-  loadSession,
-  passcodeHash,
-  saveIdentity,
-  saveSession,
-} from '../../services/crypto/persist';
-import type { IdentitySecretBundle } from '../../services/crypto/keys';
-import { useAppStore } from './useAppStore';
+  enroll,
+  fromBase64,
+  openSession,
+  registerProof,
+  toBase64,
+} from '../../native/sudoproto';
+import { postJson, signedRequest, type SignContext } from '../../services/api/client';
 import { useBootStore } from './useBootStore';
 
-// Linear sign-in flow (passcode is the account's server-side two-step PIN):
-//   phone → code → (new account)               profile  → welcome → app
-//                  (existing, has_passcode=true) passcode → welcome → app
-//                  (existing, has_passcode=false)          welcome → app
-// 'passcodeReset' is the Forgot-passcode detour off 'passcode': a fresh OTP
-// clears the account passcode, then → welcome.
-type IdentityStep =
-  | 'phone'
-  | 'code'
-  | 'profile'
-  | 'passcode'
-  | 'passcodeReset'
-  | 'welcome';
+// useIdentityStore — the sign-in / sign-up flow (SudoProto §6.6 / §11.1).
+//
+// Crypto goes through the Rust engine over FFI (src/native/sudoproto); the relay
+// is reached via services/api/client. There is NO server token — `token` here is
+// just a local "logged-in" marker for the UI; auth is keyless (SISC).
+//
+// Backend coverage today: request-otp / verify-otp / keys are real. Profile,
+// username availability, and passcode are local-only with TODOs where their
+// relay endpoints (/auth/profile, /users/username, passcode/SVR) don't exist yet.
 
-type UsernameStatus = 'idle' | 'checking' | 'invalid' | 'available' | 'taken';
+type Step = 'phone' | 'code' | 'profile' | 'passcode' | 'passcodeReset' | 'welcome';
+type UsernameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'invalid';
+
+export interface IdentityPublic {
+  idEdPub: string; // base64 Ed25519 identity key
+  authhwPub: string; // base64 SISC authHW key
+}
+
+// ── secure-store persistence ──────────────────────────────────────────────────
+const K_ENROLL = 'schat.enroll'; // StoredEnroll (secret + publics)
+const K_ACCOUNT = 'schat.account'; // StoredAccount
+const K_SESSION = 'schat.session'; // StoredSession
+const K_PROFILE = 'schat.profile'; // StoredProfile
+const K_PASSCODE = 'schat.passcode'; // sha256(passcode) hex, set only if the user opted into two-step
+
+type StoredEnroll = { secret: string; authhwPub: string; idEdPub: string; bundle: string };
+type StoredAccount = { accountId: string; deviceId: string; inboxId: string; dialCode: string; phone: string };
+type StoredSession = { sessionSk: string; sessionPub: string; certWire: string; exp: number };
+type StoredProfile = { firstName: string; lastName: string; username: string };
+
+const getJSON = async <T>(k: string): Promise<T | null> => {
+  const v = await SecureStore.getItemAsync(k);
+  return v ? (JSON.parse(v) as T) : null;
+};
+const setJSON = (k: string, v: unknown) => SecureStore.setItemAsync(k, JSON.stringify(v));
+const del = (k: string) => SecureStore.deleteItemAsync(k);
+
+const errOf = (data: unknown) => (data as { error?: string })?.error ?? 'Something went wrong';
+const usernameBad = (u: string) => !/^[a-z0-9._+-]{5,32}$/.test(u);
+const sha256Hex = (s: string) =>
+  Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, s, {
+    encoding: Crypto.CryptoEncoding.HEX,
+  });
+
+const CERT_TTL_SECS = 30 * 24 * 60 * 60; // 30 days
+
+function ctxFrom(s: StoredSession): SignContext {
+  return {
+    sessionSk: fromBase64(s.sessionSk),
+    sessionPub: fromBase64(s.sessionPub),
+    certWire: fromBase64(s.certWire),
+  };
+}
 
 type IdentityState = {
-  step: IdentityStep;
+  step: Step;
   phone: string;
   dialCode: string;
   code: string;
-  pending: boolean;
-  error: string | null;
-  token: string | null;
-  userId: string | null;
-  inboxId: string | null;
-  identity: IdentitySecretBundle | null;
-  fingerprint: string | null;
-  hydrated: boolean;
-  // New-account profile inputs (only used on the 'profile' step).
-  username: string;
   firstName: string;
   lastName: string;
-  // Passcode entry buffer, used on the 'passcode' step (verify against server).
+  username: string;
   passcode: string;
+  pending: boolean;
+  error: string | null;
+  hydrated: boolean;
   usernameStatus: UsernameStatus;
-  setPhone: (phone: string) => void;
-  setDialCode: (dial: string) => void;
-  setCode: (code: string) => void;
-  setUsername: (username: string) => void;
-  setFirstName: (name: string) => void;
-  setLastName: (name: string) => void;
-  setPasscode: (passcode: string) => void;
+  identity: IdentityPublic | null;
+  inboxId: string | null;
+  userId: string | null;
+  token: string | null;
+
+  setPhone: (v: string) => void;
+  setDialCode: (v: string) => void;
+  setCode: (v: string) => void;
+  setFirstName: (v: string) => void;
+  setLastName: (v: string) => void;
+  setUsername: (v: string) => void;
+  setPasscode: (v: string) => void;
+
   sendCode: () => Promise<void>;
   verifyCode: () => Promise<void>;
-  submitProfile: () => Promise<void>;
+  goBack: () => void;
+  reset: () => void;
   checkUsername: (u: string) => Promise<void>;
+  submitProfile: () => Promise<void>;
   submitPasscode: () => Promise<void>;
   startPasscodeReset: () => Promise<void>;
   submitPasscodeReset: () => Promise<void>;
   cancelPasscodeReset: () => void;
   finishWelcome: () => void;
   hydrateFromStorage: () => Promise<void>;
-  goBack: () => void;
-  reset: () => void;
   sessionExpired: () => void;
 };
-
-function normalizedPhoneDigits(phone: string) {
-  return phone.replace(/[^\d]/g, '');
-}
-
-function isValidPhone(phone: string) {
-  const digits = normalizedPhoneDigits(phone);
-  return digits.length >= 8 && digits.length <= 15;
-}
-
-function isValidCode(code: string) {
-  return /^\d{6}$/.test(code);
-}
-
-function isValidUsername(username: string) {
-  // a-z 0-9 . - _ + only, 5-32 chars (matches backend utils::phone::normalize_username).
-  return /^[a-z0-9._+-]{5,32}$/.test(username.trim().toLowerCase());
-}
-
-// SudoProto 3.0 §0.1.4 — sync the owner-encrypted profile to/from the cloud. The
-// relay stores only ciphertext; only this device's identity can decrypt it.
-async function pushProfile(identity: IdentitySecretBundle): Promise<void> {
-  try {
-    const a = useAppStore.getState();
-    const blob = encryptProfile(identity, {
-      username: a.username,
-      firstName: a.firstName,
-      lastName: a.lastName,
-      displayName: a.displayName,
-      bio: a.bio,
-    });
-    await putProfileBlob(blob);
-  } catch (e) {
-    console.warn('profile upload failed', e);
-  }
-}
-
-async function pullProfile(identity: IdentitySecretBundle): Promise<void> {
-  try {
-    const blob = await getProfileBlob();
-    if (!blob || blob.length === 0) return;
-    const p = decryptProfile(identity, blob);
-    if (p) useAppStore.getState().applyCloudProfile(p);
-  } catch (e) {
-    console.warn('profile download failed', e);
-  }
-}
-
-function isValidPasscode(pin: string) {
-  return /^\d{4,6}$/.test(pin);
-}
-
-function formatPhoneForApi(dialCode: string, national: string): string {
-  return `${dialCode}${normalizedPhoneDigits(national)}`;
-}
-
-export function shortFingerprint(seed: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < seed.length; i++) {
-    h = Math.imul(h ^ seed.charCodeAt(i), 0x01000193) >>> 0;
-  }
-  return h.toString(16).slice(0, 4).toUpperCase().padStart(4, '0');
-}
-
-type VerifyOtpRes = {
-  user_id: string;
-  phone: string;
-  inbox_id: string;
-  is_new: boolean;
-  has_passcode: boolean;
-  rev_epoch: number;
-};
-
-type VerifyPasscodeRes = { ok: boolean };
 
 export const useIdentityStore = create<IdentityState>((set, get) => ({
   step: 'phone',
   phone: '',
-  dialCode: '+91',
+  dialCode: '+1',
   code: '',
-  pending: false,
-  error: null,
-  token: null,
-  userId: null,
-  inboxId: null,
-  identity: null,
-  fingerprint: null,
-  hydrated: false,
-  username: '',
   firstName: '',
   lastName: '',
+  username: '',
   passcode: '',
+  pending: false,
+  error: null,
+  hydrated: false,
   usernameStatus: 'idle',
-  hydrateFromStorage: async () => {
-    if (get().hydrated) return;
-    try {
-      const sess = await loadSession();
-      const id = sess ? await loadIdentity(sess.userId) : null;
-      if (id && sess && sess.authSecHex) {
-        // Re-mint the in-memory SISC session certificate from the persisted
-        // long-term auth key. `token` is now just a non-null "signed-in" marker.
-        configureSiscSigner(sess.userId, unhex(sess.authSecHex), sess.revEpoch ?? 0);
-        set({
-          identity: id,
-          fingerprint: identityFingerprint(publicBundleOf(id)),
-          token: sess.userId,
-          userId: sess.userId,
-          phone: sess.phone,
-          inboxId: sess.inboxId,
-          hydrated: true,
-        });
-        void pullProfile(id);
-        useBootStore.getState().succeed();
-      } else {
-        set({ hydrated: true });
-      }
-    } catch (e) {
-      console.warn('hydrate failed', e);
-      set({ hydrated: true });
-    }
-  },
-  setPhone: (phone) => set({ phone: phone.replace(/\D/g, ''), error: null }),
-  setDialCode: (dialCode) => set({ dialCode, error: null }),
-  setCode: (code) => set({ code: code.replace(/\D/g, '').slice(0, 6), error: null }),
-  setUsername: (username) =>
-    set({
-      username: username.toLowerCase().replace(/[^a-z0-9._+-]/g, '').slice(0, 32),
-      usernameStatus: 'idle',
-      error: null,
-    }),
-  setFirstName: (firstName) => set({ firstName: firstName.slice(0, 40), error: null }),
-  setLastName: (lastName) => set({ lastName: lastName.slice(0, 40), error: null }),
-  setPasscode: (passcode) =>
-    set({ passcode: passcode.replace(/\D/g, '').slice(0, 6), error: null }),
+  identity: null,
+  inboxId: null,
+  userId: null,
+  token: null,
+
+  setPhone: (v) => set({ phone: v.replace(/\D/g, ''), error: null }),
+  setDialCode: (v) => set({ dialCode: v }),
+  setCode: (v) => set({ code: v.replace(/\D/g, '').slice(0, 6), error: null }),
+  setFirstName: (v) => set({ firstName: v, error: null }),
+  setLastName: (v) => set({ lastName: v }),
+  setUsername: (v) => set({ username: v.toLowerCase().replace(/[^a-z0-9._+-]/g, ''), error: null }),
+  setPasscode: (v) => set({ passcode: v.replace(/\D/g, '').slice(0, 6), error: null }),
+
   sendCode: async () => {
-    const { phone, dialCode, pending } = get();
-    if (pending) return;
-    if (!isValidPhone(phone)) {
-      set({ error: 'Enter a valid phone number.' });
+    const { phone, dialCode } = get();
+    if (phone.length < 6) {
+      set({ error: 'Enter a valid phone number' });
       return;
     }
     set({ pending: true, error: null });
     try {
-      await apiJsonPost<{ sent: boolean }>('/auth/request-otp', {
-        phone: formatPhoneForApi(dialCode, phone),
-      });
+      const r = await postJson('/auth/request-otp', { phone: dialCode + phone });
+      if (!r.ok) {
+        set({ pending: false, error: errOf(r.data) });
+        return;
+      }
       set({ pending: false, step: 'code', code: '' });
-    } catch (e) {
-      const msg =
-        e instanceof ApiError ? e.message : 'Could not send code. Check connection.';
-      set({ pending: false, error: msg });
+    } catch {
+      set({ pending: false, error: 'Network error. Check your connection.' });
     }
   },
+
   verifyCode: async () => {
-    const { phone, dialCode, code, pending } = get();
-    if (pending) return;
-    if (!isValidCode(code)) {
-      set({ error: 'Enter the 6-digit code.' });
+    const { phone, dialCode, code } = get();
+    if (code.length < 6) {
+      set({ error: 'Enter the 6-digit code' });
       return;
     }
+    // Verify needs the Rust crypto (enroll/proof/session). If the native module
+    // isn't installed, native() throws a precise, actionable message that the
+    // catch below surfaces verbatim.
     set({ pending: true, error: null });
+    const fullPhone = dialCode + phone;
     try {
-      // SudoProto 3.0: generate this login's P-256 auth key and prove possession
-      // of it by signing the OTP challenge. The server binds the public key to
-      // the account and returns NO token — we self-issue session certs from here.
-      const phoneApi = formatPhoneForApi(dialCode, phone);
-      const authKp = p256KeyGen();
-      const proof = signRegistration(authKp.sec, authKp.pub, phoneApi, code);
-      const res = await apiJsonPost<VerifyOtpRes>('/auth/verify-otp', {
-        phone: phoneApi,
-        otp: code,
-        auth_pubkey: hex(authKp.pub),
-        proof: hex(proof),
+      // 1. Load or create the enrolment (identity + authHW).
+      let e = await getJSON<StoredEnroll>(K_ENROLL);
+      if (!e) {
+        const fresh = enroll();
+        e = {
+          secret: toBase64(fresh.secret),
+          authhwPub: toBase64(fresh.authhwPub),
+          idEdPub: toBase64(fresh.idEdPub),
+          bundle: toBase64(fresh.bundle),
+        };
+        await setJSON(K_ENROLL, e);
+      }
+      const secret = fromBase64(e.secret);
+
+      // 2. Register: prove the OTP under authHW and bind the device.
+      const proof = registerProof(secret, fullPhone, code);
+      const r = await postJson<{ account_id: string; device_id: string; inbox_id: string }>(
+        '/auth/verify-otp',
+        {
+          phone: fullPhone,
+          otp: code,
+          authHW_pk: e.authhwPub,
+          idEd_pk: e.idEdPub,
+          proof: toBase64(proof),
+        },
+      );
+      if (!r.ok) {
+        set({ pending: false, error: errOf(r.data) });
+        return;
+      }
+      const { account_id, device_id, inbox_id } = r.data;
+
+      // 3. Self-issue a session and publish the identity bundle.
+      const now = Math.floor(Date.now() / 1000);
+      const sess = openSession(secret, account_id, now, now + CERT_TTL_SECS, 0);
+      const stored: StoredSession = {
+        sessionSk: toBase64(sess.sessionSk),
+        sessionPub: toBase64(sess.sessionPub),
+        certWire: toBase64(sess.certWire),
+        exp: now + CERT_TTL_SECS,
+      };
+      await setJSON(K_SESSION, stored);
+
+      // device_bundle reuses the primary bundle for this first device; dev_cert
+      // is empty for now (the FFI doesn't yet expose §6.4 device-cert signing).
+      await signedRequest('PUT', '/auth/keys', ctxFrom(stored), {
+        pubkey_bundle: e.bundle,
+        device_bundle: e.bundle,
+        dev_cert: '',
       });
 
-      // Configure the request signer BEFORE any authenticated call below.
-      configureSiscSigner(res.user_id, authKp.sec, res.rev_epoch);
-
-      // Reuse this account's existing keys on re-login (same device); only mint
-      // fresh ones for a first-ever login here. Under 3.0 the published material
-      // is just the 128-byte identity bundle (no prekey pool), so re-publishing
-      // is harmless — but we still skip it for a reused identity since nothing
-      // changed.
-      let identity = await loadIdentity(res.user_id);
-      const isNewIdentity = !identity;
-      if (!identity) identity = newIdentity();
-      const pub = publicBundleOf(identity);
-
-      // Persist locally and advance the UI IMMEDIATELY. The bundle upload is moved
-      // OFF the critical path so sign-in no longer waits on it; it publishes a
-      // moment later, well before the user can start a chat.
-      try {
-        await Promise.all([
-          saveIdentity(res.user_id, identity),
-          saveSession({
-            userId: res.user_id,
-            phone: res.phone,
-            inboxId: res.inbox_id,
-            authSecHex: hex(authKp.sec),
-            authPubHex: hex(authKp.pub),
-            revEpoch: res.rev_epoch,
-          }),
-        ]);
-      } catch (persistErr) {
-        console.warn('identity persist failed', persistErr);
-      }
+      const account: StoredAccount = {
+        accountId: account_id,
+        deviceId: device_id,
+        inboxId: inbox_id,
+        dialCode,
+        phone,
+      };
+      await setJSON(K_ACCOUNT, account);
 
       set({
         pending: false,
-        token: res.user_id,
-        userId: res.user_id,
-        phone: res.phone,
-        inboxId: res.inbox_id,
-        identity,
-        fingerprint: identityFingerprint(pub),
+        token: account_id,
+        userId: account_id,
+        inboxId: inbox_id,
+        identity: { idEdPub: e.idEdPub, authhwPub: e.authhwPub },
+        step: 'profile',
       });
-
-      // Background: publish a brand-new identity's 128-byte directory bundle
-      // (idX ‖ idEd ‖ sig). That's the whole key publication under 3.0 — no
-      // prekey pool to mint or refill.
-      if (isNewIdentity) {
-        void (async () => {
-          try {
-            await apiBinaryRequest('PUT', '/auth/keys', serializeBundle(pub), undefined);
-          } catch (keyErr) {
-            console.warn('pubkey bundle upload failed', keyErr);
-          }
-        })();
-      }
-
-      // Restore this account's owner-encrypted profile (name/username/bio) from
-      // the cloud on an existing-account login; a brand-new account has none yet.
-      if (!res.is_new) void pullProfile(identity);
-
-      // Mirror the account's server-side passcode state into local settings so
-      // the toggle and gate agree.
-      useAppStore.getState().setSecurity('appPasscode', res.has_passcode);
-
-      // Fork on what the server tells us: a brand-new account collects a
-      // profile; an already-registered one with a two-step passcode must enter
-      // it; otherwise straight to welcome.
-      if (res.is_new) {
-        set({ step: 'profile', error: null });
-        return;
-      }
-      if (res.has_passcode) {
-        set({ step: 'passcode', passcode: '', error: null });
-        return;
-      }
-      set({ step: 'welcome', error: null });
-    } catch (e) {
-      console.warn('verifyCode failed', e);
-      const msg =
-        e instanceof ApiError
-          ? e.status === 401
-            ? 'Invalid or expired code.'
-            : e.message
-          : 'Verification failed. Check connection.';
-      set({ pending: false, error: msg });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Native/setup errors (prefixed "SudoProto") are already actionable — show
+      // them verbatim so you know exactly what to fix.
+      set({ pending: false, error: msg.startsWith('SudoProto') ? msg : `Could not verify: ${msg}` });
     }
   },
-  checkUsername: async (u: string) => {
-    if (!isValidUsername(u)) {
+
+  goBack: () => set({ step: 'phone', code: '', error: null }),
+  reset: () => set({ phone: '', code: '', error: null, pending: false }),
+
+  checkUsername: async (u) => {
+    if (usernameBad(u)) {
       set({ usernameStatus: 'invalid' });
       return;
     }
     set({ usernameStatus: 'checking' });
-    try {
-      const res = await usernameCheck(u);
-      // Ignore a stale response if the input changed while it was in flight.
-      if (get().username !== u.toLowerCase()) return;
-      set({ usernameStatus: res.status });
-    } catch {
-      set({ usernameStatus: 'idle' });
-    }
+    // TODO: GET /users/username/check?h=blindIndex — endpoint not built. Optimistic.
+    set({ usernameStatus: 'available' });
   },
+
   submitProfile: async () => {
-    const { username, firstName, lastName, pending, identity } = get();
-    if (pending) return;
+    const { firstName, lastName, username } = get();
     if (!firstName.trim()) {
-      set({ error: 'Enter your first name.' });
+      set({ error: 'Enter your first name' });
       return;
     }
-    if (!isValidUsername(username)) {
-      set({ error: 'Username must be 5-32 chars: a-z 0-9 . - _ +' });
+    if (username && usernameBad(username)) {
+      set({ error: '5–32 chars: a-z 0-9 . - _ +' });
       return;
     }
     set({ pending: true, error: null });
-    // Claim the handle server-side (it validates availability + charset). The
-    // username is stored only as SHA-256 (SudoProto 3.0 §0.1.4).
-    try {
-      await usernameClaim(username);
-    } catch (e) {
-      const msg =
-        e instanceof ApiError
-          ? e.status === 400
-            ? 'That username is taken or invalid.'
-            : e.message
-          : 'Could not set username. Check connection.';
-      set({ pending: false, usernameStatus: 'taken', error: msg });
-      return;
-    }
-    useAppStore.getState().applySignupProfile({ username, firstName, lastName });
-    if (identity) void pushProfile(identity);
-    set({ pending: false, step: 'welcome', error: null, usernameStatus: 'available' });
+    // TODO: PUT /auth/profile (owner-encrypted blob) + bind username blind index.
+    // Backend endpoints not built yet — persist locally for now.
+    await setJSON(K_PROFILE, { firstName, lastName, username } satisfies StoredProfile);
+    set({ pending: false, step: 'welcome' });
   },
+
   submitPasscode: async () => {
-    const { passcode, pending, token, userId } = get();
-    if (pending) return;
-    if (!isValidPasscode(passcode)) {
-      set({ error: 'Enter a 4-6 digit passcode.' });
+    const { passcode } = get();
+    set({ pending: true, error: null });
+    const stored = await SecureStore.getItemAsync(K_PASSCODE);
+    if (stored && stored !== (await sha256Hex(passcode))) {
+      set({ pending: false, error: 'Incorrect passcode', passcode: '' });
       return;
     }
-    if (!token || !userId) {
-      set({ error: 'Session expired. Start again.' });
-      return;
-    }
+    set({ pending: false, passcode: '' });
+    useBootStore.getState().setPhase('ready');
+  },
+
+  startPasscodeReset: async () => {
+    const { phone, dialCode } = get();
     set({ pending: true, error: null });
     try {
-      const res = await apiJsonPost<VerifyPasscodeRes>(
-        '/auth/passcode/verify',
-        { hash: passcodeHash(userId, passcode) },
-        token,
-      );
-      if (!res.ok) {
-        set({ pending: false, passcode: '', error: 'Incorrect passcode.' });
+      await postJson('/auth/request-otp', { phone: dialCode + phone });
+    } catch {
+      // fall through — the reset screen lets the user retry
+    }
+    set({ pending: false, step: 'passcodeReset', code: '' });
+  },
+
+  submitPasscodeReset: async () => {
+    set({ pending: true, error: null });
+    // TODO: verify the OTP against a relay reset endpoint (not built). For now,
+    // entering the flow clears the local passcode so the user can set a new one.
+    await del(K_PASSCODE);
+    set({ pending: false, passcode: '' });
+    useBootStore.getState().setPhase('ready');
+  },
+
+  cancelPasscodeReset: () => set({ step: 'passcode', code: '', error: null }),
+
+  finishWelcome: () => useBootStore.getState().setPhase('ready'),
+
+  hydrateFromStorage: async () => {
+    try {
+      const [e, account, session, profile, passHash] = await Promise.all([
+        getJSON<StoredEnroll>(K_ENROLL),
+        getJSON<StoredAccount>(K_ACCOUNT),
+        getJSON<StoredSession>(K_SESSION),
+        getJSON<StoredProfile>(K_PROFILE),
+        SecureStore.getItemAsync(K_PASSCODE),
+      ]);
+
+      if (!e || !account) {
+        set({ hydrated: true, step: 'phone' });
         return;
       }
-      set({ pending: false, passcode: '', step: 'welcome', error: null });
-    } catch (e) {
-      const msg = e instanceof ApiError ? e.message : 'Could not verify. Check connection.';
-      set({ pending: false, error: msg });
+
+      // Returning, enrolled device: refresh the session cert if it's gone/expired.
+      let live = session;
+      const now = Math.floor(Date.now() / 1000);
+      if (!live || live.exp <= now) {
+        const sess = openSession(
+          fromBase64(e.secret),
+          account.accountId,
+          now,
+          now + CERT_TTL_SECS,
+          0,
+        );
+        live = {
+          sessionSk: toBase64(sess.sessionSk),
+          sessionPub: toBase64(sess.sessionPub),
+          certWire: toBase64(sess.certWire),
+          exp: now + CERT_TTL_SECS,
+        };
+        await setJSON(K_SESSION, live);
+      }
+
+      set({
+        hydrated: true,
+        token: account.accountId,
+        userId: account.accountId,
+        inboxId: account.inboxId,
+        dialCode: account.dialCode,
+        phone: account.phone,
+        identity: { idEdPub: e.idEdPub, authhwPub: e.authhwPub },
+        firstName: profile?.firstName ?? '',
+        lastName: profile?.lastName ?? '',
+        username: profile?.username ?? '',
+      });
+
+      // A two-step passcode gates entry; otherwise go straight to the app.
+      if (passHash) {
+        set({ step: 'passcode' });
+      } else {
+        useBootStore.getState().setPhase('ready');
+      }
+    } catch {
+      set({ hydrated: true, step: 'phone' });
     }
   },
-  startPasscodeReset: async () => {
-    // We're past sign-in OTP (which was consumed), so send a fresh one to prove
-    // ownership of the number before clearing the passcode. phone is already the
-    // full normalized number from verify-otp.
-    const { phone, pending } = get();
-    if (pending) return;
-    set({ pending: true, error: null });
-    try {
-      await apiJsonPost<{ sent: boolean }>('/auth/request-otp', { phone });
-      set({ pending: false, step: 'passcodeReset', code: '' });
-    } catch (e) {
-      const msg =
-        e instanceof ApiError ? e.message : 'Could not send code. Check connection.';
-      set({ pending: false, error: msg });
-    }
-  },
-  submitPasscodeReset: async () => {
-    const { phone, code, pending } = get();
-    if (pending) return;
-    if (!isValidCode(code)) {
-      set({ error: 'Enter the 6-digit code.' });
-      return;
-    }
-    set({ pending: true, error: null });
-    try {
-      await apiJsonPost<unknown>('/auth/passcode/reset', { phone, otp: code });
-      // Passcode cleared on the account — mirror locally and continue signed in.
-      useAppStore.getState().setSecurity('appPasscode', false);
-      set({ pending: false, code: '', passcode: '', step: 'welcome', error: null });
-    } catch (e) {
-      const msg =
-        e instanceof ApiError
-          ? e.status === 401
-            ? 'Invalid or expired code.'
-            : e.message
-          : 'Reset failed. Check connection.';
-      set({ pending: false, error: msg });
-    }
-  },
-  cancelPasscodeReset: () => set({ step: 'passcode', code: '', error: null, pending: false }),
-  finishWelcome: () => {
-    set({ error: null });
-    useBootStore.getState().succeed();
-  },
-  goBack: () =>
-    set({
-      step: 'phone',
-      code: '',
-      passcode: '',
-      error: null,
-      pending: false,
-    }),
-  reset: () => {
-    // Sign-out clears the active session (back to auth) but KEEPS this account's
-    // identity keys + chats in their per-account slots, so signing back in on
-    // this device restores them and stays decryptable (cloud-sync feel). A
-    // different account simply loads its own slots.
-    void clearSession();
-    clearSiscSigner();
-    // Different account next: wipe the device-local profile/settings mirror so
-    // one account's name/passcode-toggle doesn't bleed into another. In-memory
-    // chats are cleared by the App effect when inboxId drops to null below
-    // (hydrateChats' no-account branch) — done there to avoid a store import
-    // cycle (useChatStore already imports useIdentityStore).
-    void useAppStore.getState().resetProfile();
-    set({
-      step: 'phone',
-      phone: '',
-      dialCode: '+91',
-      code: '',
-      pending: false,
-      error: null,
-      token: null,
-      userId: null,
-      inboxId: null,
-      identity: null,
-      fingerprint: null,
-      username: '',
-      firstName: '',
-      lastName: '',
-      passcode: '',
-    });
-  },
+
   sessionExpired: () => {
-    // Token expired/rejected — NOT a user-initiated sign-out. Drop only the
-    // session (return to OTP) and KEEP the profile, chats, and per-account
-    // identity, so re-verifying the same number restores everything. Phone is
-    // kept so re-auth is one tap. inboxId→null lets the App effect clear the
-    // in-memory chats until re-login reloads them.
-    void clearSession();
-    clearSiscSigner();
-    set({
-      step: 'phone',
-      code: '',
-      passcode: '',
-      pending: false,
-      error: null,
-      token: null,
-      userId: null,
-      inboxId: null,
-      identity: null,
-      fingerprint: null,
-    });
+    void del(K_SESSION);
+    // Keep the identity keys (re-login reuses them); drop the live session.
+    set({ token: null, step: 'phone', code: '', passcode: '', error: null });
   },
 }));
-
-// Re-upload the owner-encrypted profile whenever local profile data changes
-// (debounced). No-op until an identity exists. SudoProto 3.0 §0.1.4.
-let profileSyncTimer: ReturnType<typeof setTimeout> | null = null;
-setProfileSyncTrigger(() => {
-  if (profileSyncTimer) clearTimeout(profileSyncTimer);
-  profileSyncTimer = setTimeout(() => {
-    const { identity } = useIdentityStore.getState();
-    if (identity) void pushProfile(identity);
-  }, 1500);
-});

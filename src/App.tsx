@@ -9,6 +9,7 @@ import {
   useAppStore,
   useBootStore,
   useChatStore,
+  useContactsStore,
   useIdentityStore,
   type BootPhase,
 } from './store';
@@ -80,8 +81,18 @@ function AppContent() {
   // Keying on inboxId means signing in as a different number swaps chats instead
   // of leaking the previous account's conversations.
   useEffect(() => {
-    void hydrateChats();
+    // After chats load, purge expired disappearing chats with non-verified contacts.
+    void hydrateChats().then(() => useChatStore.getState().sweepEphemeral());
+    // Refresh the contact↔account map in the background (no permission prompt) so
+    // an incoming message from someone already in our contacts reveals their saved
+    // name + number, while a stranger stays number-less (Telegram-style privacy).
+    if (inboxId) void useContactsStore.getState().syncContacts({ passive: true, force: true });
   }, [hydrateChats, inboxId]);
+
+  // Once settings have hydrated, expire stale disappearing chats (cold start).
+  useEffect(() => {
+    if (profileHydrated) useChatStore.getState().sweepEphemeral();
+  }, [profileHydrated]);
 
   // Session-expired handling: a 401 on any authenticated request signs out and
   // returns to the auth screen (identity keys are kept, so re-login reuses them).
@@ -98,8 +109,9 @@ function AppContent() {
     const sub = AppState.addEventListener('change', (s) => {
       if (s === 'active') {
         // Foregrounding: pull any messages that arrived while away, right now —
-        // don't wait for the next poll tick.
+        // don't wait for the next poll tick. Also expire stale disappearing chats.
         void useChatStore.getState().fetchInbox();
+        useChatStore.getState().sweepEphemeral();
       } else {
         // Leaving the foreground: flush RAM-only chat state to the cloud now so
         // nothing is lost when the app is closed (no local cache).
